@@ -184,6 +184,7 @@ describe("app-server v2 protocol", () => {
 					turns: true,
 					models: true,
 					tools: true,
+					diffs: true,
 				},
 			},
 		});
@@ -281,6 +282,49 @@ describe("app-server v2 protocol", () => {
 			toolName: "echo",
 			result: { details: { text: "hi" } },
 			isError: false,
+		});
+	});
+
+	test("emits structured diff notifications from tool result details", async () => {
+		const editTool: AgentTool = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit a file",
+			parameters: Type.Object({ path: Type.String() }),
+			execute: async () => ({
+				content: [{ type: "text", text: "edited" }],
+				details: {
+					diff: "- old\n+ new",
+					patch: "@@ -1 +1 @@\n-old\n+new",
+					firstChangedLine: 1,
+				},
+			}),
+		};
+		harness = createHarness({
+			responses: [{ toolCalls: [{ id: "edit-1", name: "edit", args: { path: "file.txt" } }] }, "done"],
+			tools: [editTool],
+			baseToolsOverride: { edit: editTool },
+		});
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+
+		await protocol.handleRequest({
+			id: "turn-diff",
+			method: "turn/start",
+			params: { message: "Edit file" },
+		});
+
+		const diffAvailable = notifications.find((notification) => notification.method === "item/diff/available");
+		expect(diffAvailable?.params).toMatchObject({
+			threadId: harness.session.sessionId,
+			itemId: "edit-1",
+			toolCallId: "edit-1",
+			toolName: "edit",
+			diff: "- old\n+ new",
+			patch: "@@ -1 +1 @@\n-old\n+new",
+			firstChangedLine: 1,
 		});
 	});
 

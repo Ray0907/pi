@@ -46,6 +46,18 @@ function getMessageText(message: AgentMessage): string {
 		.join("");
 }
 
+function getDiffDetails(result: unknown): Record<string, unknown> | undefined {
+	if (typeof result !== "object" || result === null || !("details" in result)) {
+		return undefined;
+	}
+	const details = (result as { details?: unknown }).details;
+	if (typeof details !== "object" || details === null) {
+		return undefined;
+	}
+	const record = details as Record<string, unknown>;
+	return typeof record.diff === "string" ? record : undefined;
+}
+
 function toThreadSummary(info: SessionInfo): AppServerThreadSummary {
 	return {
 		id: info.id,
@@ -199,6 +211,20 @@ export class AppServerProtocol {
 					result: event.result,
 					isError: event.isError,
 				});
+				{
+					const diffDetails = getDiffDetails(event.result);
+					if (diffDetails) {
+						this.emit("item/diff/available", {
+							threadId: this.runtime.session.sessionId,
+							itemId: event.toolCallId,
+							toolCallId: event.toolCallId,
+							toolName: event.toolName,
+							diff: diffDetails.diff,
+							patch: diffDetails.patch,
+							firstChangedLine: diffDetails.firstChangedLine,
+						});
+					}
+				}
 				break;
 
 			case "turn_end":
@@ -225,7 +251,7 @@ export class AppServerProtocol {
 				return success(request.id, {
 					protocolVersion: 2,
 					serverInfo: { name: "pi-app-server", version: 2 },
-					capabilities: { threads: true, turns: true, models: true, tools: true },
+					capabilities: { threads: true, turns: true, models: true, tools: true, diffs: true },
 				} satisfies AppServerInitializeResult);
 
 			case "thread/list": {

@@ -25,7 +25,7 @@ Requests use JSON-RPC-style objects without a required `jsonrpc` field:
 Responses include the same `id`:
 
 ```json
-{"id":"init","result":{"protocolVersion":2,"serverInfo":{"name":"pi-app-server","version":2},"capabilities":{"threads":true,"turns":true,"models":true,"tools":true}}}
+{"id":"init","result":{"protocolVersion":2,"serverInfo":{"name":"pi-app-server","version":2},"capabilities":{"threads":true,"turns":true,"models":true,"tools":true,"diffs":true}}}
 ```
 
 Errors are structured:
@@ -121,6 +121,7 @@ Notifications have a `method` and `params`, but no `id`.
 {"method":"item/toolCall/started","params":{"threadId":"...","itemId":"tool-1","toolCallId":"tool-1","toolName":"bash","args":{"command":"pwd"}}}
 {"method":"item/toolCall/updated","params":{"threadId":"...","itemId":"tool-1","toolCallId":"tool-1","toolName":"bash","args":{"command":"pwd"},"partialResult":{"stdout":"..."}}}
 {"method":"item/toolCall/completed","params":{"threadId":"...","itemId":"tool-1","toolCallId":"tool-1","toolName":"bash","result":{"content":[{"type":"text","text":"..."}]},"isError":false}}
+{"method":"item/diff/available","params":{"threadId":"...","itemId":"tool-1","toolCallId":"tool-1","toolName":"edit","diff":"- old\n+ new","patch":"@@ -1 +1 @@\n-old\n+new","firstChangedLine":1}}
 {"method":"item/completed","params":{"threadId":"...","itemId":"item-1","role":"assistant","text":"hello"}}
 {"method":"turn/completed","params":{"threadId":"...","message":{...},"toolResults":[]}}
 ```

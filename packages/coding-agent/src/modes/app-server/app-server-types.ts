@@ -28,6 +28,7 @@ export interface AppServerInitializeResult {
 		turns: true;
 		models: true;
 		tools: true;
+		diffs: true;
 	};
 }
 
