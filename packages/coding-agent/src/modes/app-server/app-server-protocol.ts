@@ -169,6 +169,38 @@ export class AppServerProtocol {
 				break;
 			}
 
+			case "tool_execution_start":
+				this.emit("item/toolCall/started", {
+					threadId: this.runtime.session.sessionId,
+					itemId: event.toolCallId,
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					args: event.args,
+				});
+				break;
+
+			case "tool_execution_update":
+				this.emit("item/toolCall/updated", {
+					threadId: this.runtime.session.sessionId,
+					itemId: event.toolCallId,
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					args: event.args,
+					partialResult: event.partialResult,
+				});
+				break;
+
+			case "tool_execution_end":
+				this.emit("item/toolCall/completed", {
+					threadId: this.runtime.session.sessionId,
+					itemId: event.toolCallId,
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					result: event.result,
+					isError: event.isError,
+				});
+				break;
+
 			case "turn_end":
 				this.emit("turn/completed", {
 					threadId: this.runtime.session.sessionId,
@@ -193,7 +225,7 @@ export class AppServerProtocol {
 				return success(request.id, {
 					protocolVersion: 2,
 					serverInfo: { name: "pi-app-server", version: 2 },
-					capabilities: { threads: true, turns: true, models: true },
+					capabilities: { threads: true, turns: true, models: true, tools: true },
 				} satisfies AppServerInitializeResult);
 
 			case "thread/list": {

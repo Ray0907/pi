@@ -27,6 +27,7 @@ export interface AppServerInitializeResult {
 		threads: true;
 		turns: true;
 		models: true;
+		tools: true;
 	};
 }
 

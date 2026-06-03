@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { Type } from "typebox";
 import { afterEach, describe, expect, test } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
@@ -181,6 +183,7 @@ describe("app-server v2 protocol", () => {
 					threads: true,
 					turns: true,
 					models: true,
+					tools: true,
 				},
 			},
 		});
@@ -217,6 +220,68 @@ describe("app-server v2 protocol", () => {
 			.map((notification) => notification.params.delta)
 			.join("");
 		expect(textDeltas).toBe("hello from app server");
+	});
+
+	test("emits structured tool call notifications", async () => {
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async (_toolCallId, params, _signal, onUpdate) => {
+				const text = typeof params === "object" && params !== null && "text" in params ? String(params.text) : "";
+				onUpdate?.({
+					content: [{ type: "text", text: `partial:${text}` }],
+					details: { phase: "running", text },
+				});
+				return {
+					content: [{ type: "text", text: `echo:${text}` }],
+					details: { text },
+				};
+			},
+		};
+		harness = createHarness({
+			responses: [{ toolCalls: [{ id: "tool-1", name: "echo", args: { text: "hi" } }] }, "done"],
+			tools: [echoTool],
+			baseToolsOverride: { echo: echoTool },
+		});
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+
+		await protocol.handleRequest({
+			id: "turn-tool",
+			method: "turn/start",
+			params: { message: "Use echo" },
+		});
+
+		const toolStarted = notifications.find((notification) => notification.method === "item/toolCall/started");
+		const toolUpdated = notifications.find((notification) => notification.method === "item/toolCall/updated");
+		const toolCompleted = notifications.find((notification) => notification.method === "item/toolCall/completed");
+
+		expect(toolStarted?.params).toMatchObject({
+			threadId: harness.session.sessionId,
+			itemId: "tool-1",
+			toolCallId: "tool-1",
+			toolName: "echo",
+			args: { text: "hi" },
+		});
+		expect(toolUpdated?.params).toMatchObject({
+			threadId: harness.session.sessionId,
+			itemId: "tool-1",
+			toolCallId: "tool-1",
+			toolName: "echo",
+			partialResult: { details: { phase: "running", text: "hi" } },
+		});
+		expect(toolCompleted?.params).toMatchObject({
+			threadId: harness.session.sessionId,
+			itemId: "tool-1",
+			toolCallId: "tool-1",
+			toolName: "echo",
+			result: { details: { text: "hi" } },
+			isError: false,
+		});
 	});
 
 	test("pi app-server responds to initialize over stdio before a model is selected", async () => {
