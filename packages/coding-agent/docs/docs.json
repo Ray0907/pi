@@ -91,6 +91,10 @@
           "path": "sdk.md"
         },
         {
+          "title": "App-server v2",
+          "path": "app-server.md"
+        },
+        {
           "title": "RPC Mode",
           "path": "rpc.md"
         },

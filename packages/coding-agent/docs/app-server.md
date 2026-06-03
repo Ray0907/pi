@@ -1,0 +1,132 @@
+# App-server v2
+
+`pi app-server` starts a headless JSON-RPC control plane for external UIs such as desktop apps.
+
+Unlike `--mode rpc`, app-server v2 uses thread, turn, and item primitives designed for long-running UI clients. The existing RPC mode remains supported.
+
+## Start
+
+```bash
+pi app-server
+```
+
+The current implementation uses JSONL over stdio. Send one JSON object per line and read one response or notification per line from stdout.
+
+App-server can start before a model is selected. This lets a UI initialize, list sessions, inspect state, and show model/settings controls before sending a turn.
+
+## Request format
+
+Requests use JSON-RPC-style objects without a required `jsonrpc` field:
+
+```json
+{"id":"init","method":"initialize","params":{"clientInfo":{"name":"pi-desktop"}}}
+```
+
+Responses include the same `id`:
+
+```json
+{"id":"init","result":{"protocolVersion":2,"serverInfo":{"name":"pi-app-server","version":2},"capabilities":{"threads":true,"turns":true,"models":true}}}
+```
+
+Errors are structured:
+
+```json
+{"id":"turn","error":{"code":-32000,"message":"No model selected"}}
+```
+
+## Methods
+
+### initialize
+
+Initialize a client connection.
+
+```json
+{"id":"init","method":"initialize","params":{"clientInfo":{"name":"pi-desktop","version":"0.1.0"}}}
+```
+
+### thread/list
+
+List project sessions. The active runtime thread is included even before its first message is persisted.
+
+```json
+{"id":"threads","method":"thread/list"}
+```
+
+### thread/read
+
+Read the current active thread and messages.
+
+```json
+{"id":"read","method":"thread/read"}
+```
+
+### thread/start
+
+Create a new thread in the current workspace.
+
+```json
+{"id":"new","method":"thread/start"}
+```
+
+### thread/resume
+
+Resume a session by JSONL path.
+
+```json
+{"id":"resume","method":"thread/resume","params":{"sessionPath":"/path/to/session.jsonl"}}
+```
+
+### thread/name/set
+
+Set the active thread display name.
+
+```json
+{"id":"name","method":"thread/name/set","params":{"name":"Desktop test"}}
+```
+
+### turn/start
+
+Send a user message to the active thread.
+
+```json
+{"id":"turn","method":"turn/start","params":{"message":"Inspect this repo"}}
+```
+
+The response is emitted after the accepted turn completes. Streaming progress arrives as notifications while the turn is running.
+
+### turn/interrupt
+
+Abort the active turn.
+
+```json
+{"id":"interrupt","method":"turn/interrupt"}
+```
+
+### model/list
+
+List available models.
+
+```json
+{"id":"models","method":"model/list"}
+```
+
+## Notifications
+
+Notifications have a `method` and `params`, but no `id`.
+
+```json
+{"method":"turn/started","params":{"threadId":"..."}}
+{"method":"item/started","params":{"threadId":"...","itemId":"item-1","role":"assistant"}}
+{"method":"item/agentMessage/delta","params":{"threadId":"...","itemId":"item-1","delta":"hello"}}
+{"method":"item/completed","params":{"threadId":"...","itemId":"item-1","role":"assistant","text":"hello"}}
+{"method":"turn/completed","params":{"threadId":"...","message":{...},"toolResults":[]}}
+```
+
+## Example
+
+```bash
+printf '%s\n' \
+  '{"id":"init","method":"initialize","params":{"clientInfo":{"name":"pi-desktop"}}}' \
+  '{"id":"threads","method":"thread/list"}' \
+  | pi app-server
+```

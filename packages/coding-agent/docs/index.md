@@ -60,6 +60,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Programmatic usage
 
 - [SDK](sdk.md) - embed pi in Node.js applications.
+- [App-server v2](app-server.md) - control pi from desktop apps and other long-running UIs.
 - [RPC mode](rpc.md) - integrate over stdin/stdout JSONL.
 - [JSON event stream mode](json.md) - print mode with structured events.
 - [TUI components](tui.md) - build custom terminal UI for extensions.

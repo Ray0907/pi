@@ -7,6 +7,7 @@
 - Added containerization documentation and a Gondolin extension example for routing built-in tools into a local micro-VM.
 - Added Ant Ling provider selection and setup documentation.
 - Added NVIDIA NIM provider selection, setup documentation, and direct NIM request attribution headers.
+- Added `pi app-server`, a v2 stdio JSON-RPC control plane for external UIs with thread, turn, model, and structured event primitives.
 - Added `ctx.mode` to extension contexts so extensions can distinguish TUI, RPC, JSON, and print mode.
 - Added `ctx.getSystemPromptOptions()` for extension commands to inspect the current base system prompt inputs.
 

@@ -285,6 +285,10 @@ export {
 export { type MainOptions, main } from "./main.ts";
 // Run modes for programmatic SDK usage
 export {
+	type AppServerNotification,
+	AppServerProtocol,
+	type AppServerRequest,
+	type AppServerResponse,
 	InteractiveMode,
 	type InteractiveModeOptions,
 	type ModelInfo,
@@ -295,6 +299,7 @@ export {
 	type RpcEventListener,
 	type RpcResponse,
 	type RpcSessionState,
+	runAppServerMode,
 	runPrintMode,
 	runRpcMode,
 } from "./modes/index.ts";

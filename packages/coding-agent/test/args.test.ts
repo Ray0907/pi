@@ -125,6 +125,11 @@ describe("parseArgs", () => {
 			expect(result.mode).toBe("rpc");
 		});
 
+		test("parses --mode app-server", () => {
+			const result = parseArgs(["--mode", "app-server"]);
+			expect(result.mode).toBe("app-server");
+		});
+
 		test("parses --session", () => {
 			const result = parseArgs(["--session", "/path/to/session.jsonl"]);
 			expect(result.session).toBe("/path/to/session.jsonl");
