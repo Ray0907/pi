@@ -29,6 +29,7 @@ export interface AppServerInitializeResult {
 		models: true;
 		tools: true;
 		diffs: true;
+		approvals: true;
 	};
 }
 

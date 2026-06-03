@@ -185,6 +185,7 @@ describe("app-server v2 protocol", () => {
 					models: true,
 					tools: true,
 					diffs: true,
+					approvals: true,
 				},
 			},
 		});
@@ -326,6 +327,38 @@ describe("app-server v2 protocol", () => {
 			patch: "@@ -1 +1 @@\n-old\n+new",
 			firstChangedLine: 1,
 		});
+	});
+
+	test("routes extension UI confirmation through approval requests", async () => {
+		harness = createHarness();
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+		await protocol.bindExtensions();
+
+		const confirmPromise = harness.session.extensionRunner.getUIContext().confirm("Run command", "Allow bash?");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const approval = notifications.find((notification) => notification.method === "approval/requested");
+		expect(approval?.params).toMatchObject({
+			kind: "confirm",
+			title: "Run command",
+			message: "Allow bash?",
+		});
+		expect(typeof approval?.params.approvalId).toBe("string");
+
+		const response = await protocol.handleRequest({
+			id: "approval",
+			method: "approval/respond",
+			params: { approvalId: approval?.params.approvalId, confirmed: true },
+		});
+
+		expect(response).toEqual({
+			id: "approval",
+			result: { accepted: true },
+		});
+		await expect(confirmPromise).resolves.toBe(true);
 	});
 
 	test("pi app-server responds to initialize over stdio before a model is selected", async () => {

@@ -35,6 +35,10 @@ export async function runAppServerMode(runtime: AgentSessionRuntime): Promise<ne
 		writeRawStdout(serializeJsonLine(obj));
 	};
 	const protocol = new AppServerProtocol(runtime, output);
+	await protocol.bindExtensions();
+	runtime.setRebindSession(async () => {
+		await protocol.bindExtensions();
+	});
 
 	const registerSignalHandlers = (): void => {
 		const signals: NodeJS.Signals[] = ["SIGTERM"];
@@ -72,7 +76,7 @@ export async function runAppServerMode(runtime: AgentSessionRuntime): Promise<ne
 		process.exit(exitCode);
 	}
 
-	let inputTail = Promise.resolve();
+	const inputTasks = new Set<Promise<void>>();
 
 	const handleInputLine = async (line: string) => {
 		let parsed: unknown;
@@ -87,14 +91,17 @@ export async function runAppServerMode(runtime: AgentSessionRuntime): Promise<ne
 	};
 
 	const onInputEnd = () => {
-		void inputTail.then(() => shutdown());
+		void Promise.allSettled([...inputTasks]).then(() => shutdown());
 	};
 	process.stdin.on("end", onInputEnd);
 
 	detachInput = (() => {
 		const detachJsonl = attachJsonlLineReader(process.stdin, (line) => {
-			inputTail = inputTail.then(() => handleInputLine(line));
-			void inputTail.catch(() => {});
+			const task = handleInputLine(line);
+			inputTasks.add(task);
+			void task.finally(() => {
+				inputTasks.delete(task);
+			});
 		});
 		return () => {
 			detachJsonl();

@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import type { ExtensionUIContext, ExtensionUIDialogOptions } from "../../core/extensions/index.ts";
 import { type SessionInfo, SessionManager } from "../../core/session-manager.ts";
 import type {
 	AppServerInitializeResult,
@@ -14,6 +16,10 @@ import type {
 type AppServerRuntime = Pick<AgentSessionRuntime, "cwd" | "session" | "newSession" | "switchSession">;
 
 type NotificationSink = (notification: AppServerNotification) => void;
+
+type PendingApproval = {
+	resolve: (response: Record<string, unknown>) => void;
+};
 
 function success(id: AppServerRequest["id"], result: unknown): AppServerResponse {
 	return { id, result };
@@ -102,6 +108,7 @@ export class AppServerProtocol {
 	private unsubscribe?: () => void;
 	private nextItemId = 0;
 	private activeAssistantItemId?: string;
+	private readonly pendingApprovals = new Map<string, PendingApproval>();
 
 	constructor(runtime: AppServerRuntime, notify: NotificationSink) {
 		this.runtime = runtime;
@@ -112,6 +119,18 @@ export class AppServerProtocol {
 	dispose(): void {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		for (const approval of this.pendingApprovals.values()) {
+			approval.resolve({ cancelled: true });
+		}
+		this.pendingApprovals.clear();
+	}
+
+	async bindExtensions(): Promise<void> {
+		this.bindSession(this.runtime.session);
+		await this.runtime.session.bindExtensions({
+			uiContext: this.createExtensionUIContext(),
+			mode: "rpc",
+		});
 	}
 
 	private bindSession(session: AgentSession): void {
@@ -129,6 +148,99 @@ export class AppServerProtocol {
 	private createItemId(): string {
 		this.nextItemId++;
 		return `item-${this.nextItemId}`;
+	}
+
+	private createApprovalPromise<T>(
+		opts: ExtensionUIDialogOptions | undefined,
+		defaultValue: T,
+		request: Record<string, unknown>,
+		parseResponse: (response: Record<string, unknown>) => T,
+	): Promise<T> {
+		if (opts?.signal?.aborted) {
+			return Promise.resolve(defaultValue);
+		}
+
+		const approvalId = randomUUID();
+		return new Promise((resolve) => {
+			let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+			const cleanup = () => {
+				if (timeoutId) {
+					clearTimeout(timeoutId);
+				}
+				opts?.signal?.removeEventListener("abort", onAbort);
+				this.pendingApprovals.delete(approvalId);
+			};
+
+			const finish = (response: Record<string, unknown>) => {
+				cleanup();
+				resolve(parseResponse(response));
+			};
+
+			const onAbort = () => finish({ cancelled: true });
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+			if (opts?.timeout) {
+				timeoutId = setTimeout(() => finish({ cancelled: true }), opts.timeout);
+			}
+
+			this.pendingApprovals.set(approvalId, { resolve: finish });
+			this.emit("approval/requested", {
+				approvalId,
+				timeout: opts?.timeout,
+				...request,
+			});
+		});
+	}
+
+	private createExtensionUIContext(): ExtensionUIContext {
+		return {
+			select: (title, options, opts) =>
+				this.createApprovalPromise(opts, undefined, { kind: "select", title, options }, (response) =>
+					response.cancelled ? undefined : typeof response.value === "string" ? response.value : undefined,
+				),
+			confirm: (title, message, opts) =>
+				this.createApprovalPromise(opts, false, { kind: "confirm", title, message }, (response) =>
+					response.cancelled ? false : response.confirmed === true,
+				),
+			input: (title, placeholder, opts) =>
+				this.createApprovalPromise(opts, undefined, { kind: "input", title, placeholder }, (response) =>
+					response.cancelled ? undefined : typeof response.value === "string" ? response.value : undefined,
+				),
+			notify: (message, type) => this.emit("notification/show", { message, type }),
+			onTerminalInput: () => () => {},
+			setStatus: (key, text) => this.emit("status/set", { key, text }),
+			setWorkingMessage: (message) => this.emit("working/message/set", { message }),
+			setWorkingVisible: (visible) => this.emit("working/visible/set", { visible }),
+			setWorkingIndicator: (options) => this.emit("working/indicator/set", { options }),
+			setHiddenThinkingLabel: (label) => this.emit("thinking/hiddenLabel/set", { label }),
+			setWidget: (key, lines, options) => this.emit("widget/set", { key, lines, options }),
+			setFooter: () => {},
+			setHeader: () => {},
+			setTitle: (title) => this.emit("window/title/set", { title }),
+			custom: async () => undefined as never,
+			pasteToEditor: (text) => this.emit("editor/paste", { text }),
+			setEditorText: (text) => this.emit("editor/text/set", { text }),
+			getEditorText: () => "",
+			editor: (title, prefill) =>
+				this.createApprovalPromise(undefined, undefined, { kind: "editor", title, prefill }, (response) =>
+					response.cancelled ? undefined : typeof response.value === "string" ? response.value : undefined,
+				),
+			addAutocompleteProvider: () => {},
+			setEditorComponent: () => {},
+			getEditorComponent: () => undefined,
+			get theme() {
+				return undefined as never;
+			},
+			getAllThemes: () => [],
+			getTheme: () => undefined,
+			setTheme: (name) => {
+				this.emit("theme/set", { name });
+				return { success: true };
+			},
+			getToolsExpanded: () => false,
+			setToolsExpanded: (expanded) => this.emit("tools/expanded/set", { expanded }),
+		};
 	}
 
 	private handleSessionEvent(event: AgentSessionEvent): void {
@@ -251,7 +363,7 @@ export class AppServerProtocol {
 				return success(request.id, {
 					protocolVersion: 2,
 					serverInfo: { name: "pi-app-server", version: 2 },
-					capabilities: { threads: true, turns: true, models: true, tools: true, diffs: true },
+					capabilities: { threads: true, turns: true, models: true, tools: true, diffs: true, approvals: true },
 				} satisfies AppServerInitializeResult);
 
 			case "thread/list": {
@@ -269,7 +381,7 @@ export class AppServerProtocol {
 			case "thread/start": {
 				const result = await this.runtime.newSession();
 				if (!result.cancelled) {
-					this.bindSession(this.runtime.session);
+					await this.bindExtensions();
 				}
 				return success(request.id, { cancelled: result.cancelled, thread: toCurrentThread(this.runtime.session) });
 			}
@@ -281,7 +393,7 @@ export class AppServerProtocol {
 				}
 				const result = await this.runtime.switchSession(sessionPath);
 				if (!result.cancelled) {
-					this.bindSession(this.runtime.session);
+					await this.bindExtensions();
 				}
 				return success(request.id, { cancelled: result.cancelled, thread: toCurrentThread(this.runtime.session) });
 			}
@@ -310,6 +422,19 @@ export class AppServerProtocol {
 			case "turn/interrupt":
 				await this.runtime.session.abort();
 				return success(request.id, { interrupted: true, threadId: this.runtime.session.sessionId });
+
+			case "approval/respond": {
+				const approvalId = getStringParam(request.params, "approvalId");
+				if (!approvalId) {
+					return error(request.id, -32602, "approval/respond requires params.approvalId");
+				}
+				const pending = this.pendingApprovals.get(approvalId);
+				if (!pending) {
+					return error(request.id, -32001, `Unknown approvalId: ${approvalId}`);
+				}
+				pending.resolve(getRecordParams(request.params));
+				return success(request.id, { accepted: true });
+			}
 
 			case "model/list": {
 				const models = await this.runtime.session.modelRegistry.getAvailable();

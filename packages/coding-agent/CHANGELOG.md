@@ -10,6 +10,7 @@
 - Added `pi app-server`, a v2 stdio JSON-RPC control plane for external UIs with thread, turn, model, and structured event primitives.
 - Added structured app-server tool call notifications for external desktop UIs to render tool execution progress.
 - Added structured app-server diff notifications when tool results include display diffs.
+- Added app-server approval request/response support for extension UI confirmation flows.
 - Added `ctx.mode` to extension contexts so extensions can distinguish TUI, RPC, JSON, and print mode.
 - Added `ctx.getSystemPromptOptions()` for extension commands to inspect the current base system prompt inputs.
 
