@@ -38,6 +38,7 @@ export interface AppServerThreadSummary {
 	path?: string;
 	cwd: string;
 	name?: string;
+	archived?: boolean;
 	created: string;
 	modified: string;
 	messageCount: number;
@@ -49,5 +50,6 @@ export interface AppServerThread {
 	path?: string;
 	cwd: string;
 	name?: string;
+	archived?: boolean;
 	messages: AgentMessage[];
 }

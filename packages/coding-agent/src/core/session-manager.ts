@@ -114,6 +114,7 @@ export interface LabelEntry extends SessionEntryBase {
 export interface SessionInfoEntry extends SessionEntryBase {
 	type: "session_info";
 	name?: string;
+	archived?: boolean;
 }
 
 /**
@@ -174,6 +175,8 @@ export interface SessionInfo {
 	cwd: string;
 	/** User-defined display name from session_info entries. */
 	name?: string;
+	/** True when the session has been archived by a UI/control surface. */
+	archived?: boolean;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
 	created: Date;
@@ -594,6 +597,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		let firstMessage = "";
 		const allMessages: string[] = [];
 		let name: string | undefined;
+		let archived = false;
 		let lastActivityTime: number | undefined;
 
 		const rl = createInterface({
@@ -613,7 +617,12 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 
 			// Extract session name (use latest, including explicit clears)
 			if (entry.type === "session_info") {
-				name = entry.name?.trim() || undefined;
+				if ("name" in entry) {
+					name = entry.name?.trim() || undefined;
+				}
+				if ("archived" in entry) {
+					archived = entry.archived === true;
+				}
 			}
 
 			if (entry.type !== "message") continue;
@@ -654,6 +663,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			id: header.id,
 			cwd,
 			name,
+			archived,
 			parentSessionPath,
 			created: new Date(header.timestamp),
 			modified,
@@ -667,6 +677,10 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 }
 
 export type SessionListProgress = (loaded: number, total: number) => void;
+
+export interface SessionListOptions {
+	includeArchived?: boolean;
+}
 
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
 
@@ -1023,15 +1037,20 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Append a session info entry (e.g., display name). Returns entry id. */
-	appendSessionInfo(name: string): string {
+	/** Append a session info entry (e.g., display name or archive state). Returns entry id. */
+	appendSessionInfo(name: string | undefined, metadata: { archived?: boolean } = {}): string {
 		const entry: SessionInfoEntry = {
 			type: "session_info",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
-			name: name.trim(),
 		};
+		if (name !== undefined) {
+			entry.name = name.trim();
+		}
+		if (metadata.archived !== undefined) {
+			entry.archived = metadata.archived;
+		}
 		this._appendEntry(entry);
 		return entry.id;
 	}
@@ -1043,11 +1062,23 @@ export class SessionManager {
 		const entries = this.getEntries();
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i];
-			if (entry.type === "session_info") {
+			if (entry.type === "session_info" && "name" in entry) {
 				return entry.name?.trim() || undefined;
 			}
 		}
 		return undefined;
+	}
+
+	/** Get the current archived state from the latest session_info archive entry, if any. */
+	getSessionArchived(): boolean {
+		const entries = this.getEntries();
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry.type === "session_info" && "archived" in entry) {
+				return entry.archived === true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -1490,12 +1521,19 @@ export class SessionManager {
 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
 	 * @param onProgress Optional callback for progress updates (loaded, total)
 	 */
-	static async list(cwd: string, sessionDir?: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
+	static async list(
+		cwd: string,
+		sessionDir?: string,
+		onProgress?: SessionListProgress,
+		options: SessionListOptions = {},
+	): Promise<SessionInfo[]> {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
 		const resolvedCwd = resolvePath(cwd);
 		const sessions = (await listSessionsFromDir(dir, onProgress)).filter(
-			(session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd),
+			(session) =>
+				(options.includeArchived === true || session.archived !== true) &&
+				(!filterCwd || sessionCwdMatches(session.cwd, resolvedCwd)),
 		);
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
@@ -1515,7 +1553,9 @@ export class SessionManager {
 			typeof sessionDirOrOnProgress === "string" ? normalizePath(sessionDirOrOnProgress) : undefined;
 		const progress = typeof sessionDirOrOnProgress === "function" ? sessionDirOrOnProgress : onProgress;
 		if (customSessionDir) {
-			const sessions = await listSessionsFromDir(customSessionDir, progress);
+			const sessions = (await listSessionsFromDir(customSessionDir, progress)).filter(
+				(session) => session.archived !== true,
+			);
 			sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 			return sessions;
 		}
@@ -1553,7 +1593,7 @@ export class SessionManager {
 			});
 
 			for (const info of results) {
-				if (info) {
+				if (info && info.archived !== true) {
 					sessions.push(info);
 				}
 			}

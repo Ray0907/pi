@@ -39,6 +39,12 @@ function getStringParam(params: unknown, name: string): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
+function getBooleanParam(params: unknown, name: string): boolean | undefined {
+	const record = getRecordParams(params);
+	const value = record[name];
+	return typeof value === "boolean" ? value : undefined;
+}
+
 function getMessageText(message: AgentMessage): string {
 	if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") {
 		return "";
@@ -70,6 +76,7 @@ function toThreadSummary(info: SessionInfo): AppServerThreadSummary {
 		path: info.path,
 		cwd: info.cwd,
 		name: info.name,
+		archived: info.archived,
 		created: info.created.toISOString(),
 		modified: info.modified.toISOString(),
 		messageCount: info.messageCount,
@@ -85,6 +92,7 @@ function toCurrentThreadSummary(session: AgentSession): AppServerThreadSummary {
 		path: session.sessionFile,
 		cwd: session.sessionManager.getCwd(),
 		name: session.sessionName,
+		archived: session.sessionManager.getSessionArchived(),
 		created: timestamp,
 		modified: timestamp,
 		messageCount: session.messages.length,
@@ -98,6 +106,7 @@ function toCurrentThread(session: AgentSession): AppServerThread {
 		path: session.sessionFile,
 		cwd: session.sessionManager.getCwd(),
 		name: session.sessionName,
+		archived: session.sessionManager.getSessionArchived(),
 		messages: session.messages,
 	};
 }
@@ -367,13 +376,17 @@ export class AppServerProtocol {
 				} satisfies AppServerInitializeResult);
 
 			case "thread/list": {
+				const includeArchived = getBooleanParam(request.params, "includeArchived") === true;
 				const sessions = await SessionManager.list(
 					this.runtime.cwd,
 					this.runtime.session.sessionManager.getSessionDir(),
+					undefined,
+					{ includeArchived },
 				);
 				const threads = sessions.map(toThreadSummary);
-				if (!threads.some((thread) => thread.id === this.runtime.session.sessionId)) {
-					threads.unshift(toCurrentThreadSummary(this.runtime.session));
+				const current = toCurrentThreadSummary(this.runtime.session);
+				if ((includeArchived || current.archived !== true) && !threads.some((thread) => thread.id === current.id)) {
+					threads.unshift(current);
 				}
 				return success(request.id, { threads });
 			}
@@ -408,6 +421,30 @@ export class AppServerProtocol {
 				}
 				this.runtime.session.setSessionName(name.trim());
 				return success(request.id, { thread: toCurrentThread(this.runtime.session) });
+			}
+
+			case "thread/archive": {
+				const sessionPath = getStringParam(request.params, "sessionPath");
+				if (!sessionPath) {
+					return error(request.id, -32602, "thread/archive requires params.sessionPath");
+				}
+
+				const target = SessionManager.open(sessionPath, this.runtime.session.sessionManager.getSessionDir());
+				target.appendSessionInfo(undefined, { archived: true });
+				this.emit("thread/archived", { sessionPath, threadId: target.getSessionId() });
+
+				if (this.runtime.session.sessionFile === target.getSessionFile()) {
+					const result = await this.runtime.newSession();
+					if (!result.cancelled) {
+						await this.bindExtensions();
+					}
+				}
+
+				return success(request.id, {
+					archived: true,
+					sessionPath,
+					thread: toCurrentThread(this.runtime.session),
+				});
 			}
 
 			case "turn/start": {

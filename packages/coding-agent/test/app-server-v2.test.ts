@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, test } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
 import { AppServerProtocol } from "../src/modes/app-server/app-server-protocol.ts";
 import type { AppServerNotification } from "../src/modes/app-server/app-server-types.ts";
 import { createHarness, type Harness } from "./test-harness.ts";
@@ -39,7 +40,7 @@ interface AppServerCliDirs {
 }
 
 async function runAppServerCli(
-	input: string,
+	input: string | ((dirs: AppServerCliDirs) => string),
 	options: { args?: string[]; setup?: (dirs: AppServerCliDirs) => void } = {},
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
 	const tempRoot = createTempDir();
@@ -49,6 +50,7 @@ async function runAppServerCli(
 	mkdirSync(projectDir, { recursive: true });
 	const dirs = { agentDir, projectDir, tempRoot };
 	options.setup?.(dirs);
+	const resolvedInput = typeof input === "function" ? input(dirs) : input;
 
 	return await new Promise((resolvePromise, reject) => {
 		const child = spawn(process.execPath, [tsxPath, cliPath, "app-server", "--offline", ...(options.args ?? [])], {
@@ -82,8 +84,51 @@ async function runAppServerCli(
 			resolvePromise({ stdout, stderr, code });
 		});
 
-		child.stdin.end(input);
+		child.stdin.end(resolvedInput);
 	});
+}
+
+function writeSessionFile(path: string, cwd: string, id: string, label: string): void {
+	const now = new Date().toISOString();
+	const userEntry = {
+		type: "message",
+		id: `${id}-user`,
+		parentId: null,
+		timestamp: now,
+		message: { role: "user", content: label, timestamp: Date.now() },
+	};
+	const assistantEntry = {
+		type: "message",
+		id: `${id}-assistant`,
+		parentId: userEntry.id,
+		timestamp: now,
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: `reply to ${label}` }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		},
+	};
+	writeFileSync(
+		path,
+		[
+			JSON.stringify({ type: "session", version: 3, id, timestamp: now, cwd }),
+			JSON.stringify(userEntry),
+			JSON.stringify(assistantEntry),
+			"",
+		].join("\n"),
+	);
 }
 
 function writeFauxProviderExtension(path: string): void {
@@ -412,6 +457,34 @@ describe("app-server v2 protocol", () => {
 		expect(readResponse?.result.thread?.id).toEqual(expect.any(String));
 		expect(readResponse?.result.thread?.cwd).toEqual(expect.any(String));
 		expect(readResponse?.result.thread?.messages).toEqual([]);
+	});
+
+	test("pi app-server archives a session over stdio", async () => {
+		let archivedSessionPath = "";
+		const result = await runAppServerCli(({ agentDir, projectDir }) => {
+			const sessionDir = getDefaultSessionDir(projectDir, agentDir);
+			const archivePath = join(sessionDir, "2026-01-02T00-00-00-000Z_archive-thread.jsonl");
+			archivedSessionPath = archivePath;
+			writeSessionFile(archivePath, projectDir, "archive-thread", "archive me");
+			return [
+				JSON.stringify({ id: "archive", method: "thread/archive", params: { sessionPath: archivePath } }),
+				"",
+			].join("\n");
+		});
+
+		expect(result.code).toBe(0);
+		const responses = parseJsonLines(result.stdout) as Array<{
+			id?: string;
+			method?: string;
+			result?: {
+				archived?: boolean;
+			};
+		}>;
+
+		const archive = responses.find((response) => response.id === "archive");
+		expect(archive?.result?.archived).toBe(true);
+		expect(responses.some((response) => response.method === "thread/archived")).toBe(true);
+		expect(SessionManager.open(archivedSessionPath).getSessionArchived()).toBe(true);
 	});
 
 	test("pi app-server streams a turn/start response through a desktop-registered provider", async () => {

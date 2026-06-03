@@ -234,6 +234,20 @@ describe("SessionManager custom flat session directory", () => {
 		const continuedA = SessionManager.continueRecent(projectA, tempDir);
 		expect(continuedA.getSessionFile()).toBe(sessionA);
 	});
+
+	it("hides archived sessions from lists unless explicitly included", async () => {
+		const sessionA = createPersistedSession(projectA, "from A");
+		const sessionB = createPersistedSession(projectA, "from B");
+		const managerB = SessionManager.open(sessionB, tempDir);
+		managerB.appendSessionInfo(undefined, { archived: true });
+
+		const visible = await SessionManager.list(projectA, tempDir);
+		expect(visible.map((session) => session.path)).toEqual([sessionA]);
+
+		const withArchived = await SessionManager.list(projectA, tempDir, undefined, { includeArchived: true });
+		expect(new Set(withArchived.map((session) => session.path))).toEqual(new Set([sessionA, sessionB]));
+		expect(withArchived.find((session) => session.path === sessionB)?.archived).toBe(true);
+	});
 });
 
 describe("SessionManager.setSessionFile with corrupted files", () => {
