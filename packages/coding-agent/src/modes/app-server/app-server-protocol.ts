@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { ExtensionUIContext, ExtensionUIDialogOptions } from "../../core/extensions/index.ts";
@@ -68,6 +69,22 @@ function getDiffDetails(result: unknown): Record<string, unknown> | undefined {
 	}
 	const record = details as Record<string, unknown>;
 	return typeof record.diff === "string" ? record : undefined;
+}
+
+function toModelInfo(model: Model<any> | undefined): Record<string, unknown> | undefined {
+	if (!model) {
+		return undefined;
+	}
+	return {
+		id: model.id,
+		name: model.name,
+		provider: model.provider,
+		reasoning: model.reasoning,
+	};
+}
+
+function modelsMatch(model: Model<any> | undefined, provider: string, modelId: string): model is Model<any> {
+	return model !== undefined && model.provider === provider && model.id === modelId;
 }
 
 function toThreadSummary(info: SessionInfo): AppServerThreadSummary {
@@ -475,7 +492,36 @@ export class AppServerProtocol {
 
 			case "model/list": {
 				const models = await this.runtime.session.modelRegistry.getAvailable();
+				const currentModel = this.runtime.session.model;
+				if (
+					currentModel &&
+					!models.some((model) => model.provider === currentModel.provider && model.id === currentModel.id)
+				) {
+					models.unshift(currentModel);
+				}
 				return success(request.id, { models });
+			}
+
+			case "model/current":
+				return success(request.id, { model: toModelInfo(this.runtime.session.model) });
+
+			case "model/set": {
+				const provider = getStringParam(request.params, "provider");
+				const modelId = getStringParam(request.params, "modelId");
+				if (!provider || !modelId) {
+					return error(request.id, -32602, "model/set requires params.provider and params.modelId");
+				}
+
+				const models = await this.runtime.session.modelRegistry.getAvailable();
+				const model =
+					models.find((candidate) => candidate.provider === provider && candidate.id === modelId) ??
+					(modelsMatch(this.runtime.session.model, provider, modelId) ? this.runtime.session.model : undefined);
+				if (!model) {
+					return error(request.id, -32002, `Model not found: ${provider}/${modelId}`);
+				}
+
+				await this.runtime.session.setModel(model);
+				return success(request.id, { model: toModelInfo(this.runtime.session.model) });
 			}
 
 			default:

@@ -406,6 +406,38 @@ describe("app-server v2 protocol", () => {
 		await expect(confirmPromise).resolves.toBe(true);
 	});
 
+	test("gets and sets the active model", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		const current = await protocol.handleRequest({ id: "current", method: "model/current" });
+		expect(current).toEqual({
+			id: "current",
+			result: {
+				model: expect.objectContaining({
+					id: "faux-1",
+					provider: "faux",
+				}),
+			},
+		});
+
+		const response = await protocol.handleRequest({
+			id: "set-model",
+			method: "model/set",
+			params: { provider: "faux", modelId: "faux-1" },
+		});
+
+		expect(response).toEqual({
+			id: "set-model",
+			result: {
+				model: expect.objectContaining({
+					id: "faux-1",
+					provider: "faux",
+				}),
+			},
+		});
+	});
+
 	test("pi app-server responds to initialize over stdio before a model is selected", async () => {
 		const result = await runAppServerCli(
 			`${JSON.stringify({ id: "init", method: "initialize", params: { clientInfo: { name: "smoke" } } })}\n`,
