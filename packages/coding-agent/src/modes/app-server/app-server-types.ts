@@ -68,6 +68,9 @@ export interface AppServerStatus {
 	threadId: string;
 	sessionPath?: string;
 	running: boolean;
+	activeTurnId?: string;
+	activeTurnStartedAt?: string;
+	lastActivityAt?: string;
 	pendingApprovalCount: number;
 	eventSequence: number;
 }

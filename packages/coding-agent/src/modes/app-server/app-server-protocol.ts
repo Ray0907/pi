@@ -30,6 +30,7 @@ const MAX_RECORDED_EVENTS = 500;
 const SUPPORTED_METHODS = [
 	"initialize",
 	"server/capabilities",
+	"server/status",
 	"session/events",
 	"workspace/status",
 	"thread/list",
@@ -45,6 +46,8 @@ const SUPPORTED_METHODS = [
 	"turn/start",
 	"turn/interrupt",
 	"approval/respond",
+	"usage/session",
+	"usage/thread",
 	"command/list",
 	"model/list",
 	"model/current",
@@ -54,6 +57,7 @@ const SUPPORTED_METHODS = [
 const SUPPORTED_NOTIFICATIONS = [
 	"turn/started",
 	"turn/error",
+	"turn/interrupted",
 	"turn/completed",
 	"item/started",
 	"item/agentMessage/delta",
@@ -175,12 +179,22 @@ function getCapabilities(): AppServerInitializeResult {
 	};
 }
 
-function getStatus(runtime: AppServerRuntime, pendingApprovalCount: number, eventSequence: number): AppServerStatus {
+function getStatus(
+	runtime: AppServerRuntime,
+	pendingApprovalCount: number,
+	eventSequence: number,
+	activeTurnId?: string,
+	activeTurnStartedAt?: string,
+	lastActivityAt?: string,
+): AppServerStatus {
 	return {
 		cwd: runtime.cwd,
 		threadId: runtime.session.sessionId,
 		sessionPath: runtime.session.sessionFile,
 		running: runtime.session.isStreaming,
+		activeTurnId,
+		activeTurnStartedAt,
+		lastActivityAt,
 		pendingApprovalCount,
 		eventSequence,
 	};
@@ -282,7 +296,11 @@ export class AppServerProtocol {
 	private unsubscribe?: () => void;
 	private nextItemId = 0;
 	private nextEventSequence = 0;
+	private nextTurnId = 0;
 	private activeAssistantItemId?: string;
+	private activeTurnId?: string;
+	private activeTurnStartedAt?: string;
+	private lastActivityAt?: string;
 	private readonly pendingApprovals = new Map<string, PendingApproval>();
 	private readonly recordedEvents: AppServerRecordedEvent[] = [];
 	private readonly activeTurns = new Set<Promise<void>>();
@@ -317,6 +335,8 @@ export class AppServerProtocol {
 	private bindSession(session: AgentSession): void {
 		this.unsubscribe?.();
 		this.activeAssistantItemId = undefined;
+		this.activeTurnId = undefined;
+		this.activeTurnStartedAt = undefined;
 		this.unsubscribe = session.subscribe((event) => {
 			this.handleSessionEvent(event);
 		});
@@ -325,9 +345,11 @@ export class AppServerProtocol {
 	private emit(method: string, params: Record<string, unknown>): void {
 		const notification = { method, params };
 		this.nextEventSequence++;
+		const timestamp = new Date().toISOString();
+		this.lastActivityAt = timestamp;
 		this.recordedEvents.push({
 			sequence: this.nextEventSequence,
-			timestamp: new Date().toISOString(),
+			timestamp,
 			...notification,
 		});
 		if (this.recordedEvents.length > MAX_RECORDED_EVENTS) {
@@ -339,6 +361,22 @@ export class AppServerProtocol {
 	private createItemId(): string {
 		this.nextItemId++;
 		return `item-${this.nextItemId}`;
+	}
+
+	private createTurnId(): string {
+		this.nextTurnId++;
+		return `turn-${this.nextTurnId}`;
+	}
+
+	private getStatus(): AppServerStatus {
+		return getStatus(
+			this.runtime,
+			this.pendingApprovals.size,
+			this.nextEventSequence,
+			this.activeTurnId,
+			this.activeTurnStartedAt,
+			this.lastActivityAt,
+		);
 	}
 
 	private createApprovalPromise<T>(
@@ -437,7 +475,11 @@ export class AppServerProtocol {
 	private handleSessionEvent(event: AgentSessionEvent): void {
 		switch (event.type) {
 			case "agent_start":
-				this.emit("turn/started", { threadId: this.runtime.session.sessionId });
+				this.emit("turn/started", {
+					threadId: this.runtime.session.sessionId,
+					turnId: this.activeTurnId,
+					startedAt: this.activeTurnStartedAt,
+				});
 				break;
 
 			case "message_start": {
@@ -534,9 +576,13 @@ export class AppServerProtocol {
 			case "turn_end":
 				this.emit("turn/completed", {
 					threadId: this.runtime.session.sessionId,
+					turnId: this.activeTurnId,
+					completedAt: new Date().toISOString(),
 					message: event.message,
 					toolResults: event.toolResults,
 				});
+				this.activeTurnId = undefined;
+				this.activeTurnStartedAt = undefined;
 				break;
 		}
 	}
@@ -555,6 +601,16 @@ export class AppServerProtocol {
 			case "server/capabilities":
 				return success(request.id, getCapabilities());
 
+			case "server/status":
+				return success(request.id, {
+					protocolVersion: 2,
+					serverInfo: { name: "pi-app-server", version: 2 },
+					pid: process.pid,
+					cwd: this.runtime.cwd,
+					connected: true,
+					status: this.getStatus(),
+				});
+
 			case "session/events": {
 				const rawSince = getRecordParams(request.params).since;
 				const since = typeof rawSince === "number" && Number.isFinite(rawSince) ? rawSince : 0;
@@ -566,7 +622,7 @@ export class AppServerProtocol {
 
 			case "workspace/status":
 			case "turn/status":
-				return success(request.id, getStatus(this.runtime, this.pendingApprovals.size, this.nextEventSequence));
+				return success(request.id, this.getStatus());
 
 			case "thread/list": {
 				const includeArchived = getBooleanParam(request.params, "includeArchived") === true;
@@ -644,7 +700,7 @@ export class AppServerProtocol {
 
 			case "thread/status":
 				return success(request.id, {
-					status: getStatus(this.runtime, this.pendingApprovals.size, this.nextEventSequence),
+					status: this.getStatus(),
 					thread: toCurrentThreadSummary(this.runtime.session, this.runtime.cwd),
 				});
 
@@ -733,6 +789,8 @@ export class AppServerProtocol {
 				if (!message) {
 					return error(request.id, -32602, "turn/start requires params.message");
 				}
+				const turnId = this.createTurnId();
+				const startedAt = new Date().toISOString();
 				let preflightSettled = false;
 				let preflightAccepted = false;
 				let resolveAccepted!: () => void;
@@ -742,6 +800,8 @@ export class AppServerProtocol {
 					rejectAccepted = reject;
 				});
 				const threadId = this.runtime.session.sessionId;
+				this.activeTurnId = turnId;
+				this.activeTurnStartedAt = startedAt;
 				const prompt = this.runtime.session.prompt(message, {
 					source: "rpc",
 					preflightResult: (success) => {
@@ -749,6 +809,9 @@ export class AppServerProtocol {
 						preflightAccepted = success;
 						if (success) {
 							resolveAccepted();
+						} else if (this.activeTurnId === turnId) {
+							this.activeTurnId = undefined;
+							this.activeTurnStartedAt = undefined;
 						}
 					},
 				});
@@ -759,20 +822,46 @@ export class AppServerProtocol {
 					}
 					this.emit("turn/error", {
 						threadId,
+						turnId,
 						message: turnError instanceof Error ? turnError.message : String(turnError),
 					});
+					if (this.activeTurnId === turnId) {
+						this.activeTurnId = undefined;
+						this.activeTurnStartedAt = undefined;
+					}
 				});
 				this.activeTurns.add(trackedTurn);
 				void trackedTurn.finally(() => {
 					this.activeTurns.delete(trackedTurn);
+					if (!this.runtime.session.isStreaming && this.activeTurnId === turnId) {
+						this.activeTurnId = undefined;
+						this.activeTurnStartedAt = undefined;
+					}
 				});
 				await accepted;
-				return success(request.id, { accepted: true, threadId: this.runtime.session.sessionId });
+				return success(request.id, { accepted: true, threadId: this.runtime.session.sessionId, turnId });
 			}
 
-			case "turn/interrupt":
+			case "turn/interrupt": {
+				const turnId = this.activeTurnId;
+				const wasRunning = this.runtime.session.isStreaming || this.activeTurns.size > 0;
 				await this.runtime.session.abort();
-				return success(request.id, { interrupted: true, threadId: this.runtime.session.sessionId });
+				if (wasRunning || turnId) {
+					this.emit("turn/interrupted", {
+						threadId: this.runtime.session.sessionId,
+						turnId,
+						interruptedAt: new Date().toISOString(),
+					});
+				}
+				this.activeTurnId = undefined;
+				this.activeTurnStartedAt = undefined;
+				return success(request.id, {
+					interrupted: true,
+					threadId: this.runtime.session.sessionId,
+					turnId,
+					wasRunning,
+				});
+			}
 
 			case "approval/respond": {
 				const approvalId = getStringParam(request.params, "approvalId");
@@ -786,6 +875,10 @@ export class AppServerProtocol {
 				pending.resolve(getRecordParams(request.params));
 				return success(request.id, { accepted: true });
 			}
+
+			case "usage/session":
+			case "usage/thread":
+				return success(request.id, { usage: this.runtime.session.getSessionStats() });
 
 			case "command/list":
 				return success(request.id, { commands: listCommands(this.runtime.session) });

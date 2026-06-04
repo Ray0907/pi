@@ -235,12 +235,16 @@ describe("app-server v2 protocol", () => {
 					methods: expect.arrayContaining([
 						"initialize",
 						"server/capabilities",
+						"server/status",
 						"thread/list",
+						"usage/session",
+						"usage/thread",
 						"turn/start",
 						"approval/respond",
 					]),
 					notifications: expect.arrayContaining([
 						"turn/started",
+						"turn/interrupted",
 						"item/agentMessage/delta",
 						"item/toolCall/started",
 						"item/diff/available",
@@ -250,6 +254,30 @@ describe("app-server v2 protocol", () => {
 			},
 		});
 		expect(notifications).toEqual([]);
+	});
+
+	test("reports server status for desktop process lifecycle", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		const response = await protocol.handleRequest({ id: "server-status", method: "server/status" });
+
+		expect(response).toEqual({
+			id: "server-status",
+			result: {
+				protocolVersion: 2,
+				serverInfo: { name: "pi-app-server", version: 2 },
+				pid: expect.any(Number),
+				cwd: harness.tempDir,
+				connected: true,
+				status: expect.objectContaining({
+					threadId: harness.session.sessionId,
+					running: false,
+					activeTurnId: undefined,
+					eventSequence: 0,
+				}),
+			},
+		});
 	});
 
 	test("exposes server capabilities without reinitializing", async () => {
@@ -289,6 +317,9 @@ describe("app-server v2 protocol", () => {
 			threadId: harness.session.sessionId,
 			sessionPath: harness.session.sessionFile,
 			running: false,
+			activeTurnId: undefined,
+			activeTurnStartedAt: undefined,
+			lastActivityAt: undefined,
 			pendingApprovalCount: 0,
 			eventSequence: 0,
 		};
@@ -559,8 +590,18 @@ describe("app-server v2 protocol", () => {
 			type: "response",
 			response: {
 				id: "turn-async",
-				result: { accepted: true, threadId: harness.session.sessionId },
+				result: { accepted: true, threadId: harness.session.sessionId, turnId: expect.any(String) },
 			},
+		});
+		const turnId = (race.response as { result: { turnId: string } }).result.turnId;
+		const status = await protocol.handleRequest({ id: "turn-status-running", method: "turn/status" });
+		expect(status).toEqual({
+			id: "turn-status-running",
+			result: expect.objectContaining({
+				running: true,
+				activeTurnId: turnId,
+				activeTurnStartedAt: expect.any(String),
+			}),
 		});
 		await responsePromise;
 		await new Promise((resolve) => setTimeout(resolve, 180));
@@ -584,10 +625,16 @@ describe("app-server v2 protocol", () => {
 			result: {
 				accepted: true,
 				threadId: harness.session.sessionId,
+				turnId: expect.any(String),
 			},
 		});
+		const turnId = (response as { result: { turnId: string } }).result.turnId;
 		await protocol.waitForIdle();
-		expect(notifications.map((notification) => notification.method)).toContain("turn/started");
+		expect(notifications.find((notification) => notification.method === "turn/started")?.params).toMatchObject({
+			threadId: harness.session.sessionId,
+			turnId,
+			startedAt: expect.any(String),
+		});
 		expect(notifications.map((notification) => notification.method)).toContain("item/agentMessage/delta");
 		expect(notifications.map((notification) => notification.method)).toContain("item/completed");
 		expect(notifications.map((notification) => notification.method)).toContain("turn/completed");
@@ -618,6 +665,64 @@ describe("app-server v2 protocol", () => {
 				cost: expect.objectContaining({ total: expect.any(Number) }),
 			}),
 		});
+		expect(completedTurn?.params).toMatchObject({ turnId, completedAt: expect.any(String) });
+	});
+
+	test("interrupts an active turn with an acknowledged turn id", async () => {
+		harness = createHarness({ responses: [{ text: "slow interrupted hello", delayMs: 500 }] });
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+
+		const start = await protocol.handleRequest({
+			id: "turn-start-interrupt",
+			method: "turn/start",
+			params: { message: "Respond slowly until interrupted" },
+		});
+		const turnId = (start as { result: { turnId: string } }).result.turnId;
+		const interrupted = await protocol.handleRequest({ id: "interrupt", method: "turn/interrupt" });
+
+		expect(interrupted).toEqual({
+			id: "interrupt",
+			result: {
+				interrupted: true,
+				threadId: harness.session.sessionId,
+				turnId,
+				wasRunning: true,
+			},
+		});
+		expect(notifications.find((notification) => notification.method === "turn/interrupted")?.params).toMatchObject({
+			threadId: harness.session.sessionId,
+			turnId,
+			interruptedAt: expect.any(String),
+		});
+	});
+
+	test("exposes cumulative session usage for desktop usage meters", async () => {
+		harness = createHarness({ responses: ["usage one", "usage two"] });
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+		await protocol.handleRequest({ id: "turn-usage-1", method: "turn/start", params: { message: "first" } });
+		await protocol.waitForIdle();
+		await protocol.handleRequest({ id: "turn-usage-2", method: "turn/start", params: { message: "second" } });
+		await protocol.waitForIdle();
+
+		const sessionUsage = await protocol.handleRequest({ id: "usage-session", method: "usage/session" });
+		const threadUsage = await protocol.handleRequest({ id: "usage-thread", method: "usage/thread" });
+
+		const expected = expect.objectContaining({
+			sessionId: harness.session.sessionId,
+			totalMessages: 4,
+			tokens: expect.objectContaining({
+				input: expect.any(Number),
+				output: expect.any(Number),
+				total: expect.any(Number),
+			}),
+			cost: expect.any(Number),
+			contextUsage: expect.anything(),
+		});
+		expect(sessionUsage).toEqual({ id: "usage-session", result: { usage: expected } });
+		expect(threadUsage).toEqual({ id: "usage-thread", result: { usage: expected } });
 	});
 
 	test("emits structured tool call notifications", async () => {
