@@ -167,13 +167,14 @@ function getCapabilities(): AppServerInitializeResult {
 	};
 }
 
-function getStatus(runtime: AppServerRuntime, pendingApprovalCount: number): AppServerStatus {
+function getStatus(runtime: AppServerRuntime, pendingApprovalCount: number, eventSequence: number): AppServerStatus {
 	return {
 		cwd: runtime.cwd,
 		threadId: runtime.session.sessionId,
 		sessionPath: runtime.session.sessionFile,
 		running: runtime.session.isStreaming,
 		pendingApprovalCount,
+		eventSequence,
 	};
 }
 
@@ -506,7 +507,7 @@ export class AppServerProtocol {
 
 			case "workspace/status":
 			case "turn/status":
-				return success(request.id, getStatus(this.runtime, this.pendingApprovals.size));
+				return success(request.id, getStatus(this.runtime, this.pendingApprovals.size, this.nextEventSequence));
 
 			case "thread/list": {
 				const includeArchived = getBooleanParam(request.params, "includeArchived") === true;

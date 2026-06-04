@@ -77,7 +77,7 @@ Return workspace-level state for reconnecting clients.
 Example result:
 
 ```json
-{"cwd":"/path/to/workspace","threadId":"...","sessionPath":"/path/to/session.jsonl","running":false,"pendingApprovalCount":0}
+{"cwd":"/path/to/workspace","threadId":"...","sessionPath":"/path/to/session.jsonl","running":false,"pendingApprovalCount":0,"eventSequence":42}
 ```
 
 ### thread/list

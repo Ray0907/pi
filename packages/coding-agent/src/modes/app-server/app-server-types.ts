@@ -69,4 +69,5 @@ export interface AppServerStatus {
 	sessionPath?: string;
 	running: boolean;
 	pendingApprovalCount: number;
+	eventSequence: number;
 }

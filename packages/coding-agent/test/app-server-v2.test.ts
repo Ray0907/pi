@@ -289,6 +289,7 @@ describe("app-server v2 protocol", () => {
 			sessionPath: harness.session.sessionFile,
 			running: false,
 			pendingApprovalCount: 0,
+			eventSequence: 0,
 		};
 		expect(workspaceStatus).toEqual({ id: "workspace-status", result: expectedStatus });
 		expect(turnStatus).toEqual({ id: "turn-status", result: expectedStatus });
@@ -312,6 +313,7 @@ describe("app-server v2 protocol", () => {
 			result: expect.objectContaining({
 				running: false,
 				pendingApprovalCount: 1,
+				eventSequence: 1,
 			}),
 		});
 
