@@ -25,7 +25,7 @@ Requests use JSON-RPC-style objects without a required `jsonrpc` field:
 Responses include the same `id`:
 
 ```json
-{"id":"init","result":{"protocolVersion":2,"serverInfo":{"name":"pi-app-server","version":2},"capabilities":{"threads":true,"turns":true,"models":true,"tools":true,"diffs":true,"approvals":true}}}
+{"id":"init","result":{"protocolVersion":2,"serverInfo":{"name":"pi-app-server","version":2},"capabilities":{"threads":true,"turns":true,"models":true,"tools":true,"diffs":true,"approvals":true,"methods":["initialize","server/capabilities","thread/list"],"notifications":["turn/started","item/agentMessage/delta"]}}}
 ```
 
 Errors are structured:
@@ -42,6 +42,28 @@ Initialize a client connection.
 
 ```json
 {"id":"init","method":"initialize","params":{"clientInfo":{"name":"pi-desktop","version":"0.1.0"}}}
+```
+
+### server/capabilities
+
+Return the same protocol version, server info, method list, and notification list exposed by `initialize`.
+
+```json
+{"id":"caps","method":"server/capabilities"}
+```
+
+### workspace/status
+
+Return workspace-level state for reconnecting clients.
+
+```json
+{"id":"workspace-status","method":"workspace/status"}
+```
+
+Example result:
+
+```json
+{"cwd":"/path/to/workspace","threadId":"...","sessionPath":"/path/to/session.jsonl","running":false,"pendingApprovalCount":0}
 ```
 
 ### thread/list
@@ -93,6 +115,14 @@ Send a user message to the active thread.
 ```
 
 The response is emitted after the accepted turn completes. Streaming progress arrives as notifications while the turn is running.
+
+### turn/status
+
+Return active turn state for reconnecting clients.
+
+```json
+{"id":"turn-status","method":"turn/status"}
+```
 
 ### turn/interrupt
 

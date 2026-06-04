@@ -30,6 +30,8 @@ export interface AppServerInitializeResult {
 		tools: true;
 		diffs: true;
 		approvals: true;
+		methods: string[];
+		notifications: string[];
 	};
 }
 
@@ -52,4 +54,12 @@ export interface AppServerThread {
 	name?: string;
 	archived?: boolean;
 	messages: AgentMessage[];
+}
+
+export interface AppServerStatus {
+	cwd: string;
+	threadId: string;
+	sessionPath?: string;
+	running: boolean;
+	pendingApprovalCount: number;
 }

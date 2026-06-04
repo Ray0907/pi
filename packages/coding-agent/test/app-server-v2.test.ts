@@ -231,10 +231,97 @@ describe("app-server v2 protocol", () => {
 					tools: true,
 					diffs: true,
 					approvals: true,
+					methods: expect.arrayContaining([
+						"initialize",
+						"server/capabilities",
+						"thread/list",
+						"turn/start",
+						"approval/respond",
+					]),
+					notifications: expect.arrayContaining([
+						"turn/started",
+						"item/agentMessage/delta",
+						"item/toolCall/started",
+						"item/diff/available",
+						"approval/requested",
+					]),
 				},
 			},
 		});
 		expect(notifications).toEqual([]);
+	});
+
+	test("exposes server capabilities without reinitializing", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		const response = await protocol.handleRequest({ id: "caps", method: "server/capabilities" });
+
+		expect(response).toEqual({
+			id: "caps",
+			result: {
+				protocolVersion: 2,
+				serverInfo: { name: "pi-app-server", version: 2 },
+				capabilities: expect.objectContaining({
+					threads: true,
+					turns: true,
+					models: true,
+					tools: true,
+					diffs: true,
+					approvals: true,
+					methods: expect.arrayContaining(["server/capabilities", "model/set", "turn/interrupt"]),
+					notifications: expect.arrayContaining(["turn/completed", "thread/archived"]),
+				}),
+			},
+		});
+	});
+
+	test("reports workspace and turn status", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		const workspaceStatus = await protocol.handleRequest({ id: "workspace-status", method: "workspace/status" });
+		const turnStatus = await protocol.handleRequest({ id: "turn-status", method: "turn/status" });
+
+		const expectedStatus = {
+			cwd: harness.tempDir,
+			threadId: harness.session.sessionId,
+			sessionPath: harness.session.sessionFile,
+			running: false,
+			pendingApprovalCount: 0,
+		};
+		expect(workspaceStatus).toEqual({ id: "workspace-status", result: expectedStatus });
+		expect(turnStatus).toEqual({ id: "turn-status", result: expectedStatus });
+	});
+
+	test("reports pending approval count in status", async () => {
+		harness = createHarness();
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+		await protocol.bindExtensions();
+
+		const confirmPromise = harness.session.extensionRunner.getUIContext().confirm("Run command", "Allow bash?");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		const status = await protocol.handleRequest({ id: "turn-status", method: "turn/status" });
+
+		expect(status).toEqual({
+			id: "turn-status",
+			result: expect.objectContaining({
+				running: false,
+				pendingApprovalCount: 1,
+			}),
+		});
+
+		const approval = notifications.find((notification) => notification.method === "approval/requested");
+		await protocol.handleRequest({
+			id: "approval",
+			method: "approval/respond",
+			params: { approvalId: approval?.params.approvalId, confirmed: false },
+		});
+		await expect(confirmPromise).resolves.toBe(false);
 	});
 
 	test("starts a turn and emits structured item notifications", async () => {

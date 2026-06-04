@@ -10,6 +10,7 @@ import type {
 	AppServerNotification,
 	AppServerRequest,
 	AppServerResponse,
+	AppServerStatus,
 	AppServerThread,
 	AppServerThreadSummary,
 } from "./app-server-types.ts";
@@ -21,6 +22,51 @@ type NotificationSink = (notification: AppServerNotification) => void;
 type PendingApproval = {
 	resolve: (response: Record<string, unknown>) => void;
 };
+
+const SUPPORTED_METHODS = [
+	"initialize",
+	"server/capabilities",
+	"workspace/status",
+	"thread/list",
+	"thread/start",
+	"thread/resume",
+	"thread/read",
+	"thread/name/set",
+	"thread/archive",
+	"turn/status",
+	"turn/start",
+	"turn/interrupt",
+	"approval/respond",
+	"model/list",
+	"model/current",
+	"model/set",
+] as const;
+
+const SUPPORTED_NOTIFICATIONS = [
+	"turn/started",
+	"turn/completed",
+	"item/started",
+	"item/agentMessage/delta",
+	"item/completed",
+	"item/toolCall/started",
+	"item/toolCall/updated",
+	"item/toolCall/completed",
+	"item/diff/available",
+	"approval/requested",
+	"thread/archived",
+	"notification/show",
+	"status/set",
+	"working/message/set",
+	"working/visible/set",
+	"working/indicator/set",
+	"thinking/hiddenLabel/set",
+	"widget/set",
+	"theme/set",
+	"tools/expanded/set",
+	"window/title/set",
+	"editor/paste",
+	"editor/text/set",
+] as const;
 
 function success(id: AppServerRequest["id"], result: unknown): AppServerResponse {
 	return { id, result };
@@ -85,6 +131,33 @@ function toModelInfo(model: Model<any> | undefined): Record<string, unknown> | u
 
 function modelsMatch(model: Model<any> | undefined, provider: string, modelId: string): model is Model<any> {
 	return model !== undefined && model.provider === provider && model.id === modelId;
+}
+
+function getCapabilities(): AppServerInitializeResult {
+	return {
+		protocolVersion: 2,
+		serverInfo: { name: "pi-app-server", version: 2 },
+		capabilities: {
+			threads: true,
+			turns: true,
+			models: true,
+			tools: true,
+			diffs: true,
+			approvals: true,
+			methods: [...SUPPORTED_METHODS],
+			notifications: [...SUPPORTED_NOTIFICATIONS],
+		},
+	};
+}
+
+function getStatus(runtime: AppServerRuntime, pendingApprovalCount: number): AppServerStatus {
+	return {
+		cwd: runtime.cwd,
+		threadId: runtime.session.sessionId,
+		sessionPath: runtime.session.sessionFile,
+		running: runtime.session.isStreaming,
+		pendingApprovalCount,
+	};
 }
 
 function toThreadSummary(info: SessionInfo): AppServerThreadSummary {
@@ -386,11 +459,12 @@ export class AppServerProtocol {
 	private async handleKnownRequest(request: AppServerRequest): Promise<AppServerResponse> {
 		switch (request.method) {
 			case "initialize":
-				return success(request.id, {
-					protocolVersion: 2,
-					serverInfo: { name: "pi-app-server", version: 2 },
-					capabilities: { threads: true, turns: true, models: true, tools: true, diffs: true, approvals: true },
-				} satisfies AppServerInitializeResult);
+			case "server/capabilities":
+				return success(request.id, getCapabilities());
+
+			case "workspace/status":
+			case "turn/status":
+				return success(request.id, getStatus(this.runtime, this.pendingApprovals.size));
 
 			case "thread/list": {
 				const includeArchived = getBooleanParam(request.params, "includeArchived") === true;
