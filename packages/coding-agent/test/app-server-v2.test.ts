@@ -496,6 +496,7 @@ describe("app-server v2 protocol", () => {
 			method: "turn/start",
 			params: { message: "Replay events" },
 		});
+		await protocol.waitForIdle();
 
 		const replay = await protocol.handleRequest({ id: "events", method: "session/events", params: { since: 0 } });
 
@@ -521,6 +522,7 @@ describe("app-server v2 protocol", () => {
 			method: "turn/start",
 			params: { message: "Replay events" },
 		});
+		await protocol.waitForIdle();
 		const firstReplay = (await protocol.handleRequest({
 			id: "events-1",
 			method: "session/events",
@@ -536,6 +538,31 @@ describe("app-server v2 protocol", () => {
 			id: "events-2",
 			result: { events: [], nextSequence: firstReplay.result.nextSequence },
 		});
+	});
+
+	test("accepts turn/start before the turn completes", async () => {
+		harness = createHarness({ responses: [{ text: "slow hello", delayMs: 150 }] });
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		const responsePromise = protocol.handleRequest({
+			id: "turn-async",
+			method: "turn/start",
+			params: { message: "Respond slowly" },
+		});
+		const race = await Promise.race([
+			responsePromise.then((response) => ({ type: "response" as const, response })),
+			new Promise<{ type: "timeout" }>((resolve) => setTimeout(() => resolve({ type: "timeout" }), 50)),
+		]);
+
+		expect(race).toEqual({
+			type: "response",
+			response: {
+				id: "turn-async",
+				result: { accepted: true, threadId: harness.session.sessionId },
+			},
+		});
+		await responsePromise;
+		await new Promise((resolve) => setTimeout(resolve, 180));
 	});
 
 	test("starts a turn and emits structured item notifications", async () => {
@@ -558,6 +585,7 @@ describe("app-server v2 protocol", () => {
 				threadId: harness.session.sessionId,
 			},
 		});
+		await protocol.waitForIdle();
 		expect(notifications.map((notification) => notification.method)).toContain("turn/started");
 		expect(notifications.map((notification) => notification.method)).toContain("item/agentMessage/delta");
 		expect(notifications.map((notification) => notification.method)).toContain("item/completed");
@@ -603,6 +631,7 @@ describe("app-server v2 protocol", () => {
 			method: "turn/start",
 			params: { message: "Use echo" },
 		});
+		await protocol.waitForIdle();
 
 		const toolStarted = notifications.find((notification) => notification.method === "item/toolCall/started");
 		const toolUpdated = notifications.find((notification) => notification.method === "item/toolCall/updated");
@@ -662,6 +691,7 @@ describe("app-server v2 protocol", () => {
 			method: "turn/start",
 			params: { message: "Edit file" },
 		});
+		await protocol.waitForIdle();
 
 		const diffAvailable = notifications.find((notification) => notification.method === "item/diff/available");
 		expect(diffAvailable?.params).toMatchObject({
@@ -907,7 +937,11 @@ describe("app-server v2 protocol", () => {
 		expect(messages.find((message) => message.method === "turn/completed")).toBeDefined();
 
 		const response = messages.find((message) => message.id === "turn");
+		const responseIndex = messages.findIndex((message) => message.id === "turn");
+		const startedIndex = messages.findIndex((message) => message.method === "turn/started");
 		expect(response?.result?.accepted).toBe(true);
 		expect(response?.result?.threadId).toEqual(expect.any(String));
+		expect(responseIndex).toBeGreaterThanOrEqual(0);
+		expect(startedIndex).toBeGreaterThan(responseIndex);
 	});
 });

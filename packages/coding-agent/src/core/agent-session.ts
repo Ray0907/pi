@@ -1133,6 +1133,7 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
+		await Promise.resolve();
 		await this._runAgentPrompt(messages);
 	}
 

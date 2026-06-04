@@ -167,7 +167,7 @@ Send a user message to the active thread.
 {"id":"turn","method":"turn/start","params":{"message":"Inspect this repo"}}
 ```
 
-The response is emitted after the accepted turn completes. Streaming progress arrives as notifications while the turn is running.
+The response is emitted after preflight accepts the turn, before model streaming completes. Streaming progress arrives as notifications while the turn is running.
 
 ### turn/status
 

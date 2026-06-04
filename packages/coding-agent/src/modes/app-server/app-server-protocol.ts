@@ -51,6 +51,7 @@ const SUPPORTED_METHODS = [
 
 const SUPPORTED_NOTIFICATIONS = [
 	"turn/started",
+	"turn/error",
 	"turn/completed",
 	"item/started",
 	"item/agentMessage/delta",
@@ -245,6 +246,7 @@ export class AppServerProtocol {
 	private activeAssistantItemId?: string;
 	private readonly pendingApprovals = new Map<string, PendingApproval>();
 	private readonly recordedEvents: AppServerRecordedEvent[] = [];
+	private readonly activeTurns = new Set<Promise<void>>();
 
 	constructor(runtime: AppServerRuntime, notify: NotificationSink) {
 		this.runtime = runtime;
@@ -259,6 +261,10 @@ export class AppServerProtocol {
 			approval.resolve({ cancelled: true });
 		}
 		this.pendingApprovals.clear();
+	}
+
+	async waitForIdle(): Promise<void> {
+		await Promise.allSettled([...this.activeTurns]);
 	}
 
 	async bindExtensions(): Promise<void> {
@@ -687,7 +693,40 @@ export class AppServerProtocol {
 				if (!message) {
 					return error(request.id, -32602, "turn/start requires params.message");
 				}
-				await this.runtime.session.prompt(message, { source: "rpc" });
+				let preflightSettled = false;
+				let preflightAccepted = false;
+				let resolveAccepted!: () => void;
+				let rejectAccepted!: (error: unknown) => void;
+				const accepted = new Promise<void>((resolve, reject) => {
+					resolveAccepted = resolve;
+					rejectAccepted = reject;
+				});
+				const threadId = this.runtime.session.sessionId;
+				const prompt = this.runtime.session.prompt(message, {
+					source: "rpc",
+					preflightResult: (success) => {
+						preflightSettled = true;
+						preflightAccepted = success;
+						if (success) {
+							resolveAccepted();
+						}
+					},
+				});
+				const trackedTurn = prompt.catch((turnError: unknown) => {
+					if (!preflightSettled || !preflightAccepted) {
+						rejectAccepted(turnError);
+						return;
+					}
+					this.emit("turn/error", {
+						threadId,
+						message: turnError instanceof Error ? turnError.message : String(turnError),
+					});
+				});
+				this.activeTurns.add(trackedTurn);
+				void trackedTurn.finally(() => {
+					this.activeTurns.delete(trackedTurn);
+				});
+				await accepted;
 				return success(request.id, { accepted: true, threadId: this.runtime.session.sessionId });
 			}
 

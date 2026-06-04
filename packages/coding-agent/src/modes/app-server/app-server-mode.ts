@@ -91,7 +91,10 @@ export async function runAppServerMode(runtime: AgentSessionRuntime): Promise<ne
 	};
 
 	const onInputEnd = () => {
-		void Promise.allSettled([...inputTasks]).then(() => shutdown());
+		void Promise.allSettled([...inputTasks]).then(async () => {
+			await protocol.waitForIdle();
+			await shutdown();
+		});
 	};
 	process.stdin.on("end", onInputEnd);
 
