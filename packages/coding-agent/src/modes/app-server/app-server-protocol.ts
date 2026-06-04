@@ -126,6 +126,10 @@ function getMessageText(message: AgentMessage): string {
 		.join("");
 }
 
+function getMessageUsage(message: AgentMessage): unknown {
+	return message.role === "assistant" ? message.usage : undefined;
+}
+
 function getDiffDetails(result: unknown): Record<string, unknown> | undefined {
 	if (typeof result !== "object" || result === null || !("details" in result)) {
 		return undefined;
@@ -473,6 +477,7 @@ export class AppServerProtocol {
 					itemId,
 					role: event.message.role,
 					text: getMessageText(event.message),
+					usage: getMessageUsage(event.message),
 				});
 				if (event.message.role === "assistant") {
 					this.activeAssistantItemId = undefined;

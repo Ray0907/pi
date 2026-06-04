@@ -597,6 +597,27 @@ describe("app-server v2 protocol", () => {
 			.map((notification) => notification.params.delta)
 			.join("");
 		expect(textDeltas).toBe("hello from app server");
+
+		const completedItem = notifications.find(
+			(notification) => notification.method === "item/completed" && notification.params.role === "assistant",
+		);
+		expect(completedItem?.params.usage).toMatchObject({
+			input: expect.any(Number),
+			output: expect.any(Number),
+			cacheRead: expect.any(Number),
+			cacheWrite: expect.any(Number),
+			totalTokens: expect.any(Number),
+			cost: expect.objectContaining({ total: expect.any(Number) }),
+		});
+
+		const completedTurn = notifications.find((notification) => notification.method === "turn/completed");
+		expect(completedTurn?.params.message).toMatchObject({
+			role: "assistant",
+			usage: expect.objectContaining({
+				totalTokens: expect.any(Number),
+				cost: expect.objectContaining({ total: expect.any(Number) }),
+			}),
+		});
 	});
 
 	test("emits structured tool call notifications", async () => {
