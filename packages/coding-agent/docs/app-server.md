@@ -110,6 +110,14 @@ Read the current active thread and messages.
 {"id":"read","method":"thread/read"}
 ```
 
+### thread/status
+
+Read lightweight status and metadata for the current active thread without full messages.
+
+```json
+{"id":"thread-status","method":"thread/status"}
+```
+
 ### thread/start
 
 Create a new thread in the current workspace.

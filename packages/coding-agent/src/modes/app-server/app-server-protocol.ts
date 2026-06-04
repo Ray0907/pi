@@ -35,6 +35,7 @@ const SUPPORTED_METHODS = [
 	"thread/start",
 	"thread/resume",
 	"thread/read",
+	"thread/status",
 	"thread/name/set",
 	"thread/archive",
 	"thread/pin",
@@ -193,14 +194,14 @@ function toThreadSummary(info: SessionInfo): AppServerThreadSummary {
 	};
 }
 
-function toCurrentThreadSummary(session: AgentSession): AppServerThreadSummary {
+function toCurrentThreadSummary(session: AgentSession, cwd = session.sessionManager.getCwd()): AppServerThreadSummary {
 	const header = session.sessionManager.getHeader();
 	const timestamp = header?.timestamp ?? new Date().toISOString();
 	const firstUserMessage = session.messages.find((message) => message.role === "user");
 	return {
 		id: session.sessionId,
 		path: session.sessionFile,
-		cwd: session.sessionManager.getCwd(),
+		cwd,
 		name: session.sessionName ?? session.sessionManager.getSessionName(),
 		archived: session.sessionManager.getSessionArchived(),
 		pinned: session.sessionManager.getSessionPinned(),
@@ -211,11 +212,11 @@ function toCurrentThreadSummary(session: AgentSession): AppServerThreadSummary {
 	};
 }
 
-function toCurrentThread(session: AgentSession): AppServerThread {
+function toCurrentThread(session: AgentSession, cwd = session.sessionManager.getCwd()): AppServerThread {
 	return {
 		id: session.sessionId,
 		path: session.sessionFile,
-		cwd: session.sessionManager.getCwd(),
+		cwd,
 		name: session.sessionName ?? session.sessionManager.getSessionName(),
 		archived: session.sessionManager.getSessionArchived(),
 		pinned: session.sessionManager.getSessionPinned(),
@@ -531,7 +532,7 @@ export class AppServerProtocol {
 					{ includeArchived },
 				);
 				let threads = sessions.map(toThreadSummary);
-				const current = toCurrentThreadSummary(this.runtime.session);
+				const current = toCurrentThreadSummary(this.runtime.session, this.runtime.cwd);
 				if ((includeArchived || current.archived !== true) && !threads.some((thread) => thread.id === current.id)) {
 					threads.unshift(current);
 				}
@@ -555,7 +556,7 @@ export class AppServerProtocol {
 					{ includeArchived },
 				);
 				let threads = sessions.map(toThreadSummary);
-				const current = toCurrentThreadSummary(this.runtime.session);
+				const current = toCurrentThreadSummary(this.runtime.session, this.runtime.cwd);
 				if ((includeArchived || current.archived !== true) && !threads.some((thread) => thread.id === current.id)) {
 					threads.unshift(current);
 				}
@@ -571,7 +572,10 @@ export class AppServerProtocol {
 				if (!result.cancelled) {
 					await this.bindExtensions();
 				}
-				return success(request.id, { cancelled: result.cancelled, thread: toCurrentThread(this.runtime.session) });
+				return success(request.id, {
+					cancelled: result.cancelled,
+					thread: toCurrentThread(this.runtime.session, this.runtime.cwd),
+				});
 			}
 
 			case "thread/resume": {
@@ -583,11 +587,20 @@ export class AppServerProtocol {
 				if (!result.cancelled) {
 					await this.bindExtensions();
 				}
-				return success(request.id, { cancelled: result.cancelled, thread: toCurrentThread(this.runtime.session) });
+				return success(request.id, {
+					cancelled: result.cancelled,
+					thread: toCurrentThread(this.runtime.session, this.runtime.cwd),
+				});
 			}
 
 			case "thread/read":
-				return success(request.id, { thread: toCurrentThread(this.runtime.session) });
+				return success(request.id, { thread: toCurrentThread(this.runtime.session, this.runtime.cwd) });
+
+			case "thread/status":
+				return success(request.id, {
+					status: getStatus(this.runtime, this.pendingApprovals.size, this.nextEventSequence),
+					thread: toCurrentThreadSummary(this.runtime.session, this.runtime.cwd),
+				});
 
 			case "thread/name/set": {
 				const name = getStringParam(request.params, "name");
@@ -595,7 +608,7 @@ export class AppServerProtocol {
 					return error(request.id, -32602, "thread/name/set requires a non-empty params.name");
 				}
 				this.runtime.session.setSessionName(name.trim());
-				return success(request.id, { thread: toCurrentThread(this.runtime.session) });
+				return success(request.id, { thread: toCurrentThread(this.runtime.session, this.runtime.cwd) });
 			}
 
 			case "thread/archive": {
@@ -610,7 +623,9 @@ export class AppServerProtocol {
 					? this.runtime.session.sessionManager
 					: SessionManager.open(sessionPath, this.runtime.session.sessionManager.getSessionDir());
 				target.appendSessionInfo(undefined, { archived });
-				const thread = isActiveSession ? toCurrentThread(this.runtime.session) : toThreadFromSessionManager(target);
+				const thread = isActiveSession
+					? toCurrentThread(this.runtime.session, this.runtime.cwd)
+					: toThreadFromSessionManager(target);
 				this.emit("thread/archived", { sessionPath, threadId: target.getSessionId(), archived });
 
 				if (archived && isActiveSession) {
@@ -644,7 +659,7 @@ export class AppServerProtocol {
 					return success(request.id, {
 						pinned,
 						sessionPath: this.runtime.session.sessionFile,
-						thread: toCurrentThread(this.runtime.session),
+						thread: toCurrentThread(this.runtime.session, this.runtime.cwd),
 					});
 				}
 

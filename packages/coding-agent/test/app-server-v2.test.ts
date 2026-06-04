@@ -295,6 +295,37 @@ describe("app-server v2 protocol", () => {
 		expect(turnStatus).toEqual({ id: "turn-status", result: expectedStatus });
 	});
 
+	test("reports current thread status without reading full messages", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+		await harness.session.prompt("desktop status metadata", { source: "rpc" });
+
+		const response = await protocol.handleRequest({ id: "thread-status", method: "thread/status" });
+
+		expect(response).toEqual({
+			id: "thread-status",
+			result: {
+				status: expect.objectContaining({
+					cwd: harness.tempDir,
+					threadId: harness.session.sessionId,
+					running: false,
+					pendingApprovalCount: 0,
+					eventSequence: expect.any(Number),
+				}),
+				thread: expect.objectContaining({
+					id: harness.session.sessionId,
+					cwd: harness.tempDir,
+					messageCount: 2,
+					firstMessage: "desktop status metadata",
+					archived: false,
+					pinned: false,
+				}),
+			},
+		});
+		const result = "result" in response ? response.result : undefined;
+		expect((result as { status?: { eventSequence?: number } } | undefined)?.status?.eventSequence).toBeGreaterThan(0);
+	});
+
 	test("reports pending approval count in status", async () => {
 		harness = createHarness();
 		const notifications: AppServerNotification[] = [];
@@ -733,11 +764,12 @@ describe("app-server v2 protocol", () => {
 		expect(response.error.message).toContain("model");
 	});
 
-	test("pi app-server exposes thread/list and thread/read over stdio", async () => {
+	test("pi app-server exposes thread/list, thread/read, and thread/status over stdio", async () => {
 		const result = await runAppServerCli(
 			[
 				JSON.stringify({ id: "list", method: "thread/list" }),
 				JSON.stringify({ id: "read", method: "thread/read" }),
+				JSON.stringify({ id: "thread-status", method: "thread/status" }),
 				"",
 			].join("\n"),
 		);
@@ -747,7 +779,8 @@ describe("app-server v2 protocol", () => {
 			id: string;
 			result: {
 				threads?: Array<{ id: string; cwd: string }>;
-				thread?: { id: string; cwd: string; messages: unknown[] };
+				thread?: { id: string; cwd: string; messages?: unknown[]; messageCount?: number };
+				status?: { threadId: string; running: boolean };
 			};
 		}>;
 
@@ -759,6 +792,14 @@ describe("app-server v2 protocol", () => {
 		expect(readResponse?.result.thread?.id).toEqual(expect.any(String));
 		expect(readResponse?.result.thread?.cwd).toEqual(expect.any(String));
 		expect(readResponse?.result.thread?.messages).toEqual([]);
+
+		const statusResponse = responses.find((response) => response.id === "thread-status");
+		expect(statusResponse?.result.status).toEqual(
+			expect.objectContaining({ threadId: expect.any(String), running: false }),
+		);
+		expect(statusResponse?.result.thread).toEqual(
+			expect.objectContaining({ id: statusResponse?.result.status?.threadId, messageCount: 0 }),
+		);
 	});
 
 	test("pi app-server archives a session over stdio", async () => {
