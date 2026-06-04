@@ -71,3 +71,10 @@ export interface AppServerStatus {
 	pendingApprovalCount: number;
 	eventSequence: number;
 }
+
+export interface AppServerCommand {
+	name: string;
+	description?: string;
+	source: "extension" | "prompt" | "skill";
+	sourceInfo?: unknown;
+}

@@ -193,6 +193,14 @@ Respond to an approval request emitted by the app-server.
 {"id":"approve","method":"approval/respond","params":{"approvalId":"...","confirmed":true}}
 ```
 
+### command/list
+
+List extension commands, prompt templates, and skills available for slash-command autocomplete.
+
+```json
+{"id":"commands","method":"command/list"}
+```
+
 ### model/list
 
 List available models.

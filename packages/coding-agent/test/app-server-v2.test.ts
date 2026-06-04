@@ -11,6 +11,7 @@ import { getDefaultSessionDir, SessionManager } from "../src/core/session-manage
 import { AppServerProtocol } from "../src/modes/app-server/app-server-protocol.ts";
 import type { AppServerNotification } from "../src/modes/app-server/app-server-types.ts";
 import { createHarness, type Harness } from "./test-harness.ts";
+import { createTestResourceLoader } from "./utilities.ts";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
@@ -765,6 +766,57 @@ describe("app-server v2 protocol", () => {
 					id: "faux-1",
 					provider: "faux",
 				}),
+			},
+		});
+	});
+
+	test("lists prompt and skill commands for desktop autocomplete", async () => {
+		const sourceInfo = {
+			path: "/tmp/pi-resource.md",
+			source: "test",
+			scope: "temporary" as const,
+			origin: "top-level" as const,
+		};
+		const resourceLoader = {
+			...createTestResourceLoader(),
+			getPrompts: () => ({
+				prompts: [
+					{
+						name: "review",
+						description: "Review current changes",
+						content: "Review this repo",
+						filePath: "/tmp/review.md",
+						sourceInfo,
+					},
+				],
+				diagnostics: [],
+			}),
+			getSkills: () => ({
+				skills: [
+					{
+						name: "desktop",
+						description: "Desktop workflow",
+						filePath: "/tmp/SKILL.md",
+						baseDir: "/tmp",
+						sourceInfo,
+						disableModelInvocation: false,
+					},
+				],
+				diagnostics: [],
+			}),
+		};
+		harness = createHarness({ resourceLoader });
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		const response = await protocol.handleRequest({ id: "commands", method: "command/list" });
+
+		expect(response).toEqual({
+			id: "commands",
+			result: {
+				commands: expect.arrayContaining([
+					expect.objectContaining({ name: "review", description: "Review current changes", source: "prompt" }),
+					expect.objectContaining({ name: "skill:desktop", description: "Desktop workflow", source: "skill" }),
+				]),
 			},
 		});
 	});

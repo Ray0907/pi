@@ -6,6 +6,7 @@ import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { ExtensionUIContext, ExtensionUIDialogOptions } from "../../core/extensions/index.ts";
 import { type SessionInfo, SessionManager } from "../../core/session-manager.ts";
 import type {
+	AppServerCommand,
 	AppServerInitializeResult,
 	AppServerNotification,
 	AppServerRecordedEvent,
@@ -44,6 +45,7 @@ const SUPPORTED_METHODS = [
 	"turn/start",
 	"turn/interrupt",
 	"approval/respond",
+	"command/list",
 	"model/list",
 	"model/current",
 	"model/set",
@@ -178,6 +180,39 @@ function getStatus(runtime: AppServerRuntime, pendingApprovalCount: number, even
 		pendingApprovalCount,
 		eventSequence,
 	};
+}
+
+function listCommands(session: AgentSession): AppServerCommand[] {
+	const commands: AppServerCommand[] = [];
+
+	for (const command of session.extensionRunner.getRegisteredCommands()) {
+		commands.push({
+			name: command.invocationName,
+			description: command.description,
+			source: "extension",
+			sourceInfo: command.sourceInfo,
+		});
+	}
+
+	for (const template of session.promptTemplates) {
+		commands.push({
+			name: template.name,
+			description: template.description,
+			source: "prompt",
+			sourceInfo: template.sourceInfo,
+		});
+	}
+
+	for (const skill of session.resourceLoader.getSkills().skills) {
+		commands.push({
+			name: `skill:${skill.name}`,
+			description: skill.description,
+			source: "skill",
+			sourceInfo: skill.sourceInfo,
+		});
+	}
+
+	return commands;
 }
 
 function toThreadSummary(info: SessionInfo): AppServerThreadSummary {
@@ -746,6 +781,9 @@ export class AppServerProtocol {
 				pending.resolve(getRecordParams(request.params));
 				return success(request.id, { accepted: true });
 			}
+
+			case "command/list":
+				return success(request.id, { commands: listCommands(this.runtime.session) });
 
 			case "model/list": {
 				const models = await this.runtime.session.modelRegistry.getAvailable();
