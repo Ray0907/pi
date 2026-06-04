@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -376,6 +376,52 @@ describe("app-server v2 protocol", () => {
 		expect(listAfterUnpin).toEqual({ id: "list-after-unpin", result: { threads: [] } });
 	});
 
+	test("archives and unarchives sessions server-side", async () => {
+		harness = createHarness();
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+		const sessionPath = join(harness.tempDir, "2026-01-02T00-00-00-000Z-restorable-thread.jsonl");
+		writeSessionFile(sessionPath, harness.tempDir, "restorable-thread", "restore me");
+
+		const archived = await protocol.handleRequest({
+			id: "archive",
+			method: "thread/archive",
+			params: { sessionPath },
+		});
+		const archivedState = SessionManager.open(sessionPath).getSessionArchived();
+		const unarchived = await protocol.handleRequest({
+			id: "unarchive",
+			method: "thread/archive",
+			params: { sessionPath, archived: false },
+		});
+		const unarchivedState = SessionManager.open(sessionPath).getSessionArchived();
+
+		expect(archived).toEqual({
+			id: "archive",
+			result: {
+				archived: true,
+				sessionPath,
+				thread: expect.objectContaining({ archived: true }),
+			},
+		});
+		expect(archivedState).toBe(true);
+		expect(unarchived).toEqual({
+			id: "unarchive",
+			result: {
+				archived: false,
+				sessionPath,
+				thread: expect.objectContaining({ id: "restorable-thread", archived: false }),
+			},
+		});
+		expect(unarchivedState).toBe(false);
+		expect(notifications).toEqual([
+			expect.objectContaining({ method: "thread/archived", params: expect.objectContaining({ archived: true }) }),
+			expect.objectContaining({ method: "thread/archived", params: expect.objectContaining({ archived: false }) }),
+		]);
+	});
+
 	test("searches threads by message text and metadata", async () => {
 		harness = createHarness();
 		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
@@ -741,6 +787,57 @@ describe("app-server v2 protocol", () => {
 		expect(archive?.result?.archived).toBe(true);
 		expect(responses.some((response) => response.method === "thread/archived")).toBe(true);
 		expect(SessionManager.open(archivedSessionPath).getSessionArchived()).toBe(true);
+	});
+
+	test("pi app-server unarchives a session over stdio", async () => {
+		let archivedSessionPath = "";
+		const result = await runAppServerCli(({ agentDir, projectDir }) => {
+			const resolvedProjectDir = realpathSync(projectDir);
+			const sessionDir = getDefaultSessionDir(resolvedProjectDir, agentDir);
+			const archivePath = join(sessionDir, "2026-01-02T00-00-00-000Z_unarchive-thread.jsonl");
+			archivedSessionPath = archivePath;
+			writeSessionFile(archivePath, resolvedProjectDir, "unarchive-thread", "restore me");
+			return [
+				JSON.stringify({ id: "archive", method: "thread/archive", params: { sessionPath: archivePath } }),
+				JSON.stringify({
+					id: "unarchive",
+					method: "thread/archive",
+					params: { sessionPath: archivePath, archived: false },
+				}),
+				JSON.stringify({ id: "list", method: "thread/list" }),
+				"",
+			].join("\n");
+		});
+
+		expect(result.code).toBe(0);
+		const responses = parseJsonLines(result.stdout) as Array<{
+			id?: string;
+			method?: string;
+			params?: { archived?: boolean };
+			result?: {
+				archived?: boolean;
+				threads?: Array<{ id: string; archived?: boolean }>;
+			};
+		}>;
+
+		const archive = responses.find((response) => response.id === "archive");
+		const unarchive = responses.find((response) => response.id === "unarchive");
+		const list = responses.find((response) => response.id === "list");
+		expect(archive?.result?.archived).toBe(true);
+		expect(unarchive?.result?.archived).toBe(false);
+		expect(list?.result?.threads).toEqual(
+			expect.arrayContaining([expect.objectContaining({ id: "unarchive-thread", archived: false })]),
+		);
+		expect(responses).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ method: "thread/archived", params: expect.objectContaining({ archived: true }) }),
+				expect.objectContaining({
+					method: "thread/archived",
+					params: expect.objectContaining({ archived: false }),
+				}),
+			]),
+		);
+		expect(SessionManager.open(archivedSessionPath).getSessionArchived()).toBe(false);
 	});
 
 	test("pi app-server streams a turn/start response through a desktop-registered provider", async () => {

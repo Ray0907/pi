@@ -223,6 +223,18 @@ function toCurrentThread(session: AgentSession): AppServerThread {
 	};
 }
 
+function toThreadFromSessionManager(sessionManager: SessionManager): AppServerThread {
+	return {
+		id: sessionManager.getSessionId(),
+		path: sessionManager.getSessionFile(),
+		cwd: sessionManager.getCwd(),
+		name: sessionManager.getSessionName(),
+		archived: sessionManager.getSessionArchived(),
+		pinned: sessionManager.getSessionPinned(),
+		messages: [],
+	};
+}
+
 export class AppServerProtocol {
 	private readonly runtime: AppServerRuntime;
 	private readonly notify: NotificationSink;
@@ -591,12 +603,17 @@ export class AppServerProtocol {
 				if (!sessionPath) {
 					return error(request.id, -32602, "thread/archive requires params.sessionPath");
 				}
+				const archived = getBooleanParam(request.params, "archived") ?? true;
 
-				const target = SessionManager.open(sessionPath, this.runtime.session.sessionManager.getSessionDir());
-				target.appendSessionInfo(undefined, { archived: true });
-				this.emit("thread/archived", { sessionPath, threadId: target.getSessionId() });
+				const isActiveSession = sessionPath === this.runtime.session.sessionFile;
+				const target = isActiveSession
+					? this.runtime.session.sessionManager
+					: SessionManager.open(sessionPath, this.runtime.session.sessionManager.getSessionDir());
+				target.appendSessionInfo(undefined, { archived });
+				const thread = isActiveSession ? toCurrentThread(this.runtime.session) : toThreadFromSessionManager(target);
+				this.emit("thread/archived", { sessionPath, threadId: target.getSessionId(), archived });
 
-				if (this.runtime.session.sessionFile === target.getSessionFile()) {
+				if (archived && isActiveSession) {
 					const result = await this.runtime.newSession();
 					if (!result.cancelled) {
 						await this.bindExtensions();
@@ -604,9 +621,9 @@ export class AppServerProtocol {
 				}
 
 				return success(request.id, {
-					archived: true,
+					archived,
 					sessionPath,
-					thread: toCurrentThread(this.runtime.session),
+					thread,
 				});
 			}
 
