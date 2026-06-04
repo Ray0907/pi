@@ -33,6 +33,8 @@ const SUPPORTED_METHODS = [
 	"thread/read",
 	"thread/name/set",
 	"thread/archive",
+	"thread/pin",
+	"thread/search",
 	"turn/status",
 	"turn/start",
 	"turn/interrupt",
@@ -54,6 +56,7 @@ const SUPPORTED_NOTIFICATIONS = [
 	"item/diff/available",
 	"approval/requested",
 	"thread/archived",
+	"thread/pinned",
 	"notification/show",
 	"status/set",
 	"working/message/set",
@@ -90,6 +93,16 @@ function getBooleanParam(params: unknown, name: string): boolean | undefined {
 	const record = getRecordParams(params);
 	const value = record[name];
 	return typeof value === "boolean" ? value : undefined;
+}
+
+function searchMatches(thread: AppServerThreadSummary, query: string): boolean {
+	const normalized = query.trim().toLowerCase();
+	if (!normalized) {
+		return true;
+	}
+	return [thread.name, thread.firstMessage, thread.id, thread.cwd]
+		.filter((value): value is string => typeof value === "string")
+		.some((value) => value.toLowerCase().includes(normalized));
 }
 
 function getMessageText(message: AgentMessage): string {
@@ -167,6 +180,7 @@ function toThreadSummary(info: SessionInfo): AppServerThreadSummary {
 		cwd: info.cwd,
 		name: info.name,
 		archived: info.archived,
+		pinned: info.pinned,
 		created: info.created.toISOString(),
 		modified: info.modified.toISOString(),
 		messageCount: info.messageCount,
@@ -177,16 +191,18 @@ function toThreadSummary(info: SessionInfo): AppServerThreadSummary {
 function toCurrentThreadSummary(session: AgentSession): AppServerThreadSummary {
 	const header = session.sessionManager.getHeader();
 	const timestamp = header?.timestamp ?? new Date().toISOString();
+	const firstUserMessage = session.messages.find((message) => message.role === "user");
 	return {
 		id: session.sessionId,
 		path: session.sessionFile,
 		cwd: session.sessionManager.getCwd(),
-		name: session.sessionName,
+		name: session.sessionName ?? session.sessionManager.getSessionName(),
 		archived: session.sessionManager.getSessionArchived(),
+		pinned: session.sessionManager.getSessionPinned(),
 		created: timestamp,
 		modified: timestamp,
 		messageCount: session.messages.length,
-		firstMessage: "",
+		firstMessage: firstUserMessage ? getMessageText(firstUserMessage) : "",
 	};
 }
 
@@ -195,8 +211,9 @@ function toCurrentThread(session: AgentSession): AppServerThread {
 		id: session.sessionId,
 		path: session.sessionFile,
 		cwd: session.sessionManager.getCwd(),
-		name: session.sessionName,
+		name: session.sessionName ?? session.sessionManager.getSessionName(),
 		archived: session.sessionManager.getSessionArchived(),
+		pinned: session.sessionManager.getSessionPinned(),
 		messages: session.messages,
 	};
 }
@@ -468,16 +485,45 @@ export class AppServerProtocol {
 
 			case "thread/list": {
 				const includeArchived = getBooleanParam(request.params, "includeArchived") === true;
+				const pinnedOnly = getBooleanParam(request.params, "pinnedOnly") === true;
 				const sessions = await SessionManager.list(
 					this.runtime.cwd,
 					this.runtime.session.sessionManager.getSessionDir(),
 					undefined,
 					{ includeArchived },
 				);
-				const threads = sessions.map(toThreadSummary);
+				let threads = sessions.map(toThreadSummary);
 				const current = toCurrentThreadSummary(this.runtime.session);
 				if ((includeArchived || current.archived !== true) && !threads.some((thread) => thread.id === current.id)) {
 					threads.unshift(current);
+				}
+				if (pinnedOnly) {
+					threads = threads.filter((thread) => thread.pinned === true);
+				}
+				return success(request.id, { threads });
+			}
+
+			case "thread/search": {
+				const query = getStringParam(request.params, "query");
+				if (query === undefined) {
+					return error(request.id, -32602, "thread/search requires params.query");
+				}
+				const includeArchived = getBooleanParam(request.params, "includeArchived") === true;
+				const pinnedOnly = getBooleanParam(request.params, "pinnedOnly") === true;
+				const sessions = await SessionManager.list(
+					this.runtime.cwd,
+					this.runtime.session.sessionManager.getSessionDir(),
+					undefined,
+					{ includeArchived },
+				);
+				let threads = sessions.map(toThreadSummary);
+				const current = toCurrentThreadSummary(this.runtime.session);
+				if ((includeArchived || current.archived !== true) && !threads.some((thread) => thread.id === current.id)) {
+					threads.unshift(current);
+				}
+				threads = threads.filter((thread) => searchMatches(thread, query));
+				if (pinnedOnly) {
+					threads = threads.filter((thread) => thread.pinned === true);
 				}
 				return success(request.id, { threads });
 			}
@@ -535,6 +581,46 @@ export class AppServerProtocol {
 					archived: true,
 					sessionPath,
 					thread: toCurrentThread(this.runtime.session),
+				});
+			}
+
+			case "thread/pin": {
+				const sessionPath = getStringParam(request.params, "sessionPath");
+				const pinned = getBooleanParam(request.params, "pinned");
+				if (pinned === undefined) {
+					return error(request.id, -32602, "thread/pin requires boolean params.pinned");
+				}
+
+				if (!sessionPath || sessionPath === this.runtime.session.sessionFile) {
+					this.runtime.session.sessionManager.appendSessionInfo(undefined, { pinned });
+					this.emit("thread/pinned", {
+						sessionPath: this.runtime.session.sessionFile,
+						threadId: this.runtime.session.sessionId,
+						pinned,
+					});
+					return success(request.id, {
+						pinned,
+						sessionPath: this.runtime.session.sessionFile,
+						thread: toCurrentThread(this.runtime.session),
+					});
+				}
+
+				const target = SessionManager.open(sessionPath, this.runtime.session.sessionManager.getSessionDir());
+				target.appendSessionInfo(undefined, { pinned });
+				this.emit("thread/pinned", { sessionPath, threadId: target.getSessionId(), pinned });
+
+				return success(request.id, {
+					pinned,
+					sessionPath,
+					thread: {
+						id: target.getSessionId(),
+						path: target.getSessionFile(),
+						cwd: target.getCwd(),
+						name: target.getSessionName(),
+						archived: target.getSessionArchived(),
+						pinned: target.getSessionPinned(),
+						messages: [],
+					},
 				});
 			}
 

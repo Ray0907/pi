@@ -115,6 +115,7 @@ export interface SessionInfoEntry extends SessionEntryBase {
 	type: "session_info";
 	name?: string;
 	archived?: boolean;
+	pinned?: boolean;
 }
 
 /**
@@ -177,6 +178,8 @@ export interface SessionInfo {
 	name?: string;
 	/** True when the session has been archived by a UI/control surface. */
 	archived?: boolean;
+	/** True when the session has been pinned by a UI/control surface. */
+	pinned?: boolean;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
 	created: Date;
@@ -598,6 +601,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		const allMessages: string[] = [];
 		let name: string | undefined;
 		let archived = false;
+		let pinned = false;
 		let lastActivityTime: number | undefined;
 
 		const rl = createInterface({
@@ -622,6 +626,9 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 				}
 				if ("archived" in entry) {
 					archived = entry.archived === true;
+				}
+				if ("pinned" in entry) {
+					pinned = entry.pinned === true;
 				}
 			}
 
@@ -664,6 +671,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			cwd,
 			name,
 			archived,
+			pinned,
 			parentSessionPath,
 			created: new Date(header.timestamp),
 			modified,
@@ -1037,8 +1045,8 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Append a session info entry (e.g., display name or archive state). Returns entry id. */
-	appendSessionInfo(name: string | undefined, metadata: { archived?: boolean } = {}): string {
+	/** Append a session info entry (e.g., display name, pin, or archive state). Returns entry id. */
+	appendSessionInfo(name: string | undefined, metadata: { archived?: boolean; pinned?: boolean } = {}): string {
 		const entry: SessionInfoEntry = {
 			type: "session_info",
 			id: generateId(this.byId),
@@ -1050,6 +1058,9 @@ export class SessionManager {
 		}
 		if (metadata.archived !== undefined) {
 			entry.archived = metadata.archived;
+		}
+		if (metadata.pinned !== undefined) {
+			entry.pinned = metadata.pinned;
 		}
 		this._appendEntry(entry);
 		return entry.id;
@@ -1076,6 +1087,18 @@ export class SessionManager {
 			const entry = entries[i];
 			if (entry.type === "session_info" && "archived" in entry) {
 				return entry.archived === true;
+			}
+		}
+		return false;
+	}
+
+	/** Get the current pinned state from the latest session_info pin entry, if any. */
+	getSessionPinned(): boolean {
+		const entries = this.getEntries();
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry.type === "session_info" && "pinned" in entry) {
+				return entry.pinned === true;
 			}
 		}
 		return false;

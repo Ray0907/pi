@@ -41,6 +41,7 @@ export interface AppServerThreadSummary {
 	cwd: string;
 	name?: string;
 	archived?: boolean;
+	pinned?: boolean;
 	created: string;
 	modified: string;
 	messageCount: number;
@@ -53,6 +54,7 @@ export interface AppServerThread {
 	cwd: string;
 	name?: string;
 	archived?: boolean;
+	pinned?: boolean;
 	messages: AgentMessage[];
 }
 

@@ -74,6 +74,20 @@ List project sessions. The active runtime thread is included even before its fir
 {"id":"threads","method":"thread/list"}
 ```
 
+Pass `pinnedOnly: true` to return only pinned threads.
+
+```json
+{"id":"pinned","method":"thread/list","params":{"pinnedOnly":true}}
+```
+
+### thread/search
+
+Search project sessions by id, name, first user message, or cwd.
+
+```json
+{"id":"search","method":"thread/search","params":{"query":"roadmap"}}
+```
+
 ### thread/read
 
 Read the current active thread and messages.
@@ -104,6 +118,22 @@ Set the active thread display name.
 
 ```json
 {"id":"name","method":"thread/name/set","params":{"name":"Desktop test"}}
+```
+
+### thread/archive
+
+Archive a session by JSONL path. If the active session is archived, app-server starts a new current thread.
+
+```json
+{"id":"archive","method":"thread/archive","params":{"sessionPath":"/path/to/session.jsonl"}}
+```
+
+### thread/pin
+
+Pin or unpin a session. If `sessionPath` is omitted, app-server updates the active thread.
+
+```json
+{"id":"pin","method":"thread/pin","params":{"sessionPath":"/path/to/session.jsonl","pinned":true}}
 ```
 
 ### turn/start
@@ -161,6 +191,7 @@ Notifications have a `method` and `params`, but no `id`.
 {"method":"item/toolCall/completed","params":{"threadId":"...","itemId":"tool-1","toolCallId":"tool-1","toolName":"bash","result":{"content":[{"type":"text","text":"..."}]},"isError":false}}
 {"method":"item/diff/available","params":{"threadId":"...","itemId":"tool-1","toolCallId":"tool-1","toolName":"edit","diff":"- old\n+ new","patch":"@@ -1 +1 @@\n-old\n+new","firstChangedLine":1}}
 {"method":"approval/requested","params":{"approvalId":"...","kind":"confirm","title":"Run command","message":"Allow bash?","timeout":30000}}
+{"method":"thread/pinned","params":{"sessionPath":"/path/to/session.jsonl","threadId":"...","pinned":true}}
 {"method":"item/completed","params":{"threadId":"...","itemId":"item-1","role":"assistant","text":"hello"}}
 {"method":"turn/completed","params":{"threadId":"...","message":{...},"toolResults":[]}}
 ```

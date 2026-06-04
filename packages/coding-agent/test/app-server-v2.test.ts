@@ -324,6 +324,87 @@ describe("app-server v2 protocol", () => {
 		await expect(confirmPromise).resolves.toBe(false);
 	});
 
+	test("pins and unpins sessions server-side", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		const pinned = await protocol.handleRequest({
+			id: "pin",
+			method: "thread/pin",
+			params: { sessionPath: harness.session.sessionFile, pinned: true },
+		});
+		const listPinned = await protocol.handleRequest({
+			id: "list-pinned",
+			method: "thread/list",
+			params: { pinnedOnly: true },
+		});
+		const unpinned = await protocol.handleRequest({
+			id: "unpin",
+			method: "thread/pin",
+			params: { sessionPath: harness.session.sessionFile, pinned: false },
+		});
+		const listAfterUnpin = await protocol.handleRequest({
+			id: "list-after-unpin",
+			method: "thread/list",
+			params: { pinnedOnly: true },
+		});
+
+		expect(pinned).toEqual({
+			id: "pin",
+			result: {
+				pinned: true,
+				sessionPath: harness.session.sessionFile,
+				thread: expect.objectContaining({ id: harness.session.sessionId, pinned: true }),
+			},
+		});
+		expect(listPinned).toEqual({
+			id: "list-pinned",
+			result: {
+				threads: expect.arrayContaining([expect.objectContaining({ id: harness.session.sessionId, pinned: true })]),
+			},
+		});
+		expect(unpinned).toEqual({
+			id: "unpin",
+			result: {
+				pinned: false,
+				sessionPath: harness.session.sessionFile,
+				thread: expect.objectContaining({ id: harness.session.sessionId, pinned: false }),
+			},
+		});
+		expect(listAfterUnpin).toEqual({ id: "list-after-unpin", result: { threads: [] } });
+	});
+
+	test("searches threads by message text and metadata", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+		harness.session.sessionManager.appendSessionInfo("Roadmap Review");
+		await harness.session.prompt("desktop app-server searchable needle", { source: "rpc" });
+
+		const byMessage = await protocol.handleRequest({
+			id: "search-message",
+			method: "thread/search",
+			params: { query: "searchable needle" },
+		});
+		const byName = await protocol.handleRequest({
+			id: "search-name",
+			method: "thread/search",
+			params: { query: "roadmap" },
+		});
+
+		expect(byMessage).toEqual({
+			id: "search-message",
+			result: {
+				threads: expect.arrayContaining([expect.objectContaining({ id: harness.session.sessionId })]),
+			},
+		});
+		expect(byName).toEqual({
+			id: "search-name",
+			result: {
+				threads: expect.arrayContaining([expect.objectContaining({ id: harness.session.sessionId })]),
+			},
+		});
+	});
+
 	test("starts a turn and emits structured item notifications", async () => {
 		harness = createHarness({ responses: ["hello from app server"] });
 		const notifications: AppServerNotification[] = [];
