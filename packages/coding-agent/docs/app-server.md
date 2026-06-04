@@ -52,6 +52,20 @@ Return the same protocol version, server info, method list, and notification lis
 {"id":"caps","method":"server/capabilities"}
 ```
 
+### session/events
+
+Replay notifications recorded by the current app-server process after a sequence number. This is intended for desktop reconnect flows.
+
+```json
+{"id":"events","method":"session/events","params":{"since":42}}
+```
+
+Example result:
+
+```json
+{"events":[{"sequence":43,"timestamp":"2026-01-01T00:00:00.000Z","method":"turn/completed","params":{"threadId":"..."}}],"nextSequence":43}
+```
+
 ### workspace/status
 
 Return workspace-level state for reconnecting clients.

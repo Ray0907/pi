@@ -17,6 +17,11 @@ export interface AppServerNotification {
 	params: Record<string, unknown>;
 }
 
+export interface AppServerRecordedEvent extends AppServerNotification {
+	sequence: number;
+	timestamp: string;
+}
+
 export interface AppServerInitializeResult {
 	protocolVersion: 2;
 	serverInfo: {

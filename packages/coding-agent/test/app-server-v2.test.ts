@@ -405,6 +405,60 @@ describe("app-server v2 protocol", () => {
 		});
 	});
 
+	test("replays recorded session events after a sequence", async () => {
+		harness = createHarness({ responses: ["hello replay"] });
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+
+		await protocol.handleRequest({
+			id: "turn-replay",
+			method: "turn/start",
+			params: { message: "Replay events" },
+		});
+
+		const replay = await protocol.handleRequest({ id: "events", method: "session/events", params: { since: 0 } });
+
+		expect(replay).toEqual({
+			id: "events",
+			result: {
+				events: expect.arrayContaining([
+					expect.objectContaining({ sequence: 1, method: "turn/started" }),
+					expect.objectContaining({ method: "item/agentMessage/delta" }),
+					expect.objectContaining({ method: "turn/completed" }),
+				]),
+				nextSequence: notifications.length,
+			},
+		});
+	});
+
+	test("returns no replay events when since matches latest sequence", async () => {
+		harness = createHarness({ responses: ["hello replay"] });
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		await protocol.handleRequest({
+			id: "turn-replay",
+			method: "turn/start",
+			params: { message: "Replay events" },
+		});
+		const firstReplay = (await protocol.handleRequest({
+			id: "events-1",
+			method: "session/events",
+			params: { since: 0 },
+		})) as { result: { nextSequence: number } };
+		const secondReplay = await protocol.handleRequest({
+			id: "events-2",
+			method: "session/events",
+			params: { since: firstReplay.result.nextSequence },
+		});
+
+		expect(secondReplay).toEqual({
+			id: "events-2",
+			result: { events: [], nextSequence: firstReplay.result.nextSequence },
+		});
+	});
+
 	test("starts a turn and emits structured item notifications", async () => {
 		harness = createHarness({ responses: ["hello from app server"] });
 		const notifications: AppServerNotification[] = [];

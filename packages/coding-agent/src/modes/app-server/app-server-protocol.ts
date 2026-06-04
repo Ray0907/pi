@@ -8,6 +8,7 @@ import { type SessionInfo, SessionManager } from "../../core/session-manager.ts"
 import type {
 	AppServerInitializeResult,
 	AppServerNotification,
+	AppServerRecordedEvent,
 	AppServerRequest,
 	AppServerResponse,
 	AppServerStatus,
@@ -23,9 +24,12 @@ type PendingApproval = {
 	resolve: (response: Record<string, unknown>) => void;
 };
 
+const MAX_RECORDED_EVENTS = 500;
+
 const SUPPORTED_METHODS = [
 	"initialize",
 	"server/capabilities",
+	"session/events",
 	"workspace/status",
 	"thread/list",
 	"thread/start",
@@ -223,8 +227,10 @@ export class AppServerProtocol {
 	private readonly notify: NotificationSink;
 	private unsubscribe?: () => void;
 	private nextItemId = 0;
+	private nextEventSequence = 0;
 	private activeAssistantItemId?: string;
 	private readonly pendingApprovals = new Map<string, PendingApproval>();
+	private readonly recordedEvents: AppServerRecordedEvent[] = [];
 
 	constructor(runtime: AppServerRuntime, notify: NotificationSink) {
 		this.runtime = runtime;
@@ -258,7 +264,17 @@ export class AppServerProtocol {
 	}
 
 	private emit(method: string, params: Record<string, unknown>): void {
-		this.notify({ method, params });
+		const notification = { method, params };
+		this.nextEventSequence++;
+		this.recordedEvents.push({
+			sequence: this.nextEventSequence,
+			timestamp: new Date().toISOString(),
+			...notification,
+		});
+		if (this.recordedEvents.length > MAX_RECORDED_EVENTS) {
+			this.recordedEvents.splice(0, this.recordedEvents.length - MAX_RECORDED_EVENTS);
+		}
+		this.notify(notification);
 	}
 
 	private createItemId(): string {
@@ -478,6 +494,15 @@ export class AppServerProtocol {
 			case "initialize":
 			case "server/capabilities":
 				return success(request.id, getCapabilities());
+
+			case "session/events": {
+				const rawSince = getRecordParams(request.params).since;
+				const since = typeof rawSince === "number" && Number.isFinite(rawSince) ? rawSince : 0;
+				return success(request.id, {
+					events: this.recordedEvents.filter((event) => event.sequence > since),
+					nextSequence: this.nextEventSequence,
+				});
+			}
 
 			case "workspace/status":
 			case "turn/status":

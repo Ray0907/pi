@@ -13,6 +13,7 @@
 - Added app-server approval request/response support for extension UI confirmation flows.
 - Added app-server method/notification capabilities plus workspace and turn status requests for desktop reconnect flows.
 - Added app-server server-side thread pinning and thread search for desktop session management.
+- Added app-server session event replay for desktop reconnect flows.
 - Added `ctx.mode` to extension contexts so extensions can distinguish TUI, RPC, JSON, and print mode.
 - Added `ctx.getSystemPromptOptions()` for extension commands to inspect the current base system prompt inputs.
 
