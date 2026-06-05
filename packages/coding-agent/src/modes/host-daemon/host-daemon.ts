@@ -123,8 +123,16 @@ function parseHostDaemonOptions(args: string[], cwd = process.cwd()): HostDaemon
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
+		if (arg === "--") {
+			appServerArgs.push(...args.slice(i + 1));
+			break;
+		}
 		if (arg === "--offline") {
 			appServerArgs.push("--offline");
+			continue;
+		}
+		if (arg === "--app-server-arg" && i + 1 < args.length) {
+			appServerArgs.push(args[++i]);
 			continue;
 		}
 		if (arg === "--listen" && i + 1 < args.length) {

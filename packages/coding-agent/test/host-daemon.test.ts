@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -314,6 +314,128 @@ describe("host daemon", () => {
 			await daemon.stop();
 		}
 	});
+
+	test("passes trailing app-server args to opened workspace app-servers", async () => {
+		const dirs = createDirs();
+		const workspace = realpathSync(dirs.projectDir);
+		const extensionPath = join(workspace, "host-daemon-faux-provider.mjs");
+		writeFileSync(
+			extensionPath,
+			`
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+
+export default function activate(pi) {
+  pi.registerProvider("host-daemon-faux", {
+    name: "Host Daemon Faux",
+    baseUrl: "http://localhost:0",
+    apiKey: "faux-key",
+    api: "faux",
+    models: [{
+      id: "host-daemon-faux-1",
+      name: "Host Daemon Faux 1",
+      api: "faux",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 1024
+    }],
+    streamSimple(model) {
+      const stream = createAssistantMessageEventStream();
+      const message = {
+        role: "assistant",
+        content: [{ type: "text", text: "host daemon passthrough ready" }],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+        stopReason: "stop",
+        timestamp: Date.now()
+      };
+      queueMicrotask(() => {
+        stream.push({ type: "start", partial: { ...message, content: [] } });
+        stream.push({ type: "text_start", contentIndex: 0, partial: { ...message, content: [{ type: "text", text: "" }] } });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: "host daemon passthrough ready", partial: message });
+        stream.push({ type: "text_end", contentIndex: 0, content: "host daemon passthrough ready", partial: message });
+        stream.push({ type: "done", reason: "stop", message });
+      });
+      return stream;
+    }
+  });
+}
+`,
+		);
+		const daemon = await startHostDaemon([
+			"--token",
+			"secret-token",
+			"--listen",
+			"127.0.0.1:0",
+			"--workspace",
+			workspace,
+			"--",
+			"--extension",
+			extensionPath,
+			"--model",
+			"host-daemon-faux/host-daemon-faux-1",
+		]);
+
+		try {
+			const baseUrl = `http://${daemon.host}:${daemon.port}`;
+			const listed = await rpc(baseUrl, { id: "workspaces", method: "workspace/list" }, "secret-token");
+			const workspaceId = (
+				listed.json as { result: { workspaces: Array<{ id: string; path: string }> } }
+			).result.workspaces.find((candidate) => candidate.path === workspace)?.id;
+
+			const turn = await rpc(
+				baseUrl,
+				{
+					id: "turn",
+					method: "workspace/request",
+					params: {
+						workspaceId,
+						request: { id: "app-turn", method: "turn/start", params: { message: "Run passthrough check" } },
+					},
+				},
+				"secret-token",
+			);
+			expect(turn.status).toBe(200);
+			expect(turn.json).toEqual({
+				id: "turn",
+				result: expect.objectContaining({
+					response: {
+						id: "app-turn",
+						result: expect.objectContaining({
+							accepted: true,
+							threadId: expect.any(String),
+							turnId: expect.any(String),
+						}),
+					},
+				}),
+			});
+
+			const completed = await waitFor(async () => {
+				const response = await rpc(
+					baseUrl,
+					{ id: "events", method: "workspace/events", params: { workspaceId, afterSequence: 0 } },
+					"secret-token",
+				);
+				const events = (
+					response.json as { result?: { events?: Array<{ event: { method?: string; params?: unknown } }> } }
+				).result?.events;
+				return events?.find((event) => event.event.method === "turn/completed");
+			}, 5_000);
+
+			expect(completed.event.params).toEqual(
+				expect.objectContaining({
+					message: expect.objectContaining({
+						content: expect.arrayContaining([expect.objectContaining({ text: "host daemon passthrough ready" })]),
+					}),
+				}),
+			);
+		} finally {
+			await daemon.stop();
+		}
+	}, 15_000);
 
 	test("closes an opened workspace app-server", async () => {
 		const dirs = createDirs();
