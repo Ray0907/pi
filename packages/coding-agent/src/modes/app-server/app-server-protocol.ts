@@ -308,6 +308,13 @@ function toThreadFromSessionManager(sessionManager: SessionManager): AppServerTh
 	};
 }
 
+function readThreadFromSessionManager(sessionManager: SessionManager): AppServerThread {
+	return {
+		...toThreadFromSessionManager(sessionManager),
+		messages: sessionManager.buildSessionContext().messages,
+	};
+}
+
 export class AppServerProtocol {
 	private readonly runtime: AppServerRuntime;
 	private readonly notify: NotificationSink;
@@ -795,8 +802,20 @@ export class AppServerProtocol {
 				});
 			}
 
-			case "thread/read":
+			case "thread/read": {
+				const params = getRecordParams(request.params);
+				if ("sessionPath" in params && typeof params.sessionPath !== "string") {
+					return error(request.id, -32602, "thread/read params.sessionPath must be a string");
+				}
+				if (typeof params.sessionPath === "string" && params.sessionPath.trim()) {
+					const target = SessionManager.open(
+						params.sessionPath,
+						this.runtime.session.sessionManager.getSessionDir(),
+					);
+					return success(request.id, { thread: readThreadFromSessionManager(target) });
+				}
 				return success(request.id, { thread: toCurrentThread(this.runtime.session, this.runtime.cwd) });
+			}
 
 			case "thread/status":
 				return success(request.id, {

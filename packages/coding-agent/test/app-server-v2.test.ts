@@ -611,6 +611,40 @@ describe("app-server v2 protocol", () => {
 		});
 	});
 
+	test("reads a historical thread by sessionPath without resuming it", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+		const historicalSessionPath = join(createTempDir(), "historical-read.jsonl");
+		writeSessionFile(
+			historicalSessionPath,
+			harness.session.sessionManager.getCwd(),
+			"historical-read",
+			"preview this thread",
+		);
+
+		const read = await protocol.handleRequest({
+			id: "read-historical",
+			method: "thread/read",
+			params: { sessionPath: historicalSessionPath },
+		});
+
+		expect(read).toEqual({
+			id: "read-historical",
+			result: {
+				thread: expect.objectContaining({
+					id: "historical-read",
+					path: historicalSessionPath,
+					cwd: harness.session.sessionManager.getCwd(),
+					messages: expect.arrayContaining([
+						expect.objectContaining({ role: "user", content: "preview this thread" }),
+						expect.objectContaining({ role: "assistant" }),
+					]),
+				}),
+			},
+		});
+		expect(harness.session.sessionId).not.toBe("historical-read");
+	});
+
 	test("lists forkable messages and forks the active thread from a selected message", async () => {
 		harness = createHarness({ responses: ["fork response"] });
 		const notifications: AppServerNotification[] = [];
@@ -1309,6 +1343,46 @@ describe("app-server v2 protocol", () => {
 				expect.objectContaining({ id: "historical-search", firstMessage: "opening user only" }),
 			]),
 		);
+	});
+
+	test("pi app-server reads historical sessions by sessionPath over stdio", async () => {
+		let historicalSessionPath = "";
+		const result = await runAppServerCli(({ agentDir, projectDir }) => {
+			const resolvedProjectDir = realpathSync(projectDir);
+			const sessionDir = getDefaultSessionDir(resolvedProjectDir, agentDir);
+			historicalSessionPath = join(sessionDir, "2026-01-02T00-00-00-000Z_historical-read.jsonl");
+			writeSessionFile(historicalSessionPath, resolvedProjectDir, "historical-read", "preview this thread");
+			return [
+				JSON.stringify({
+					id: "read",
+					method: "thread/read",
+					params: { sessionPath: historicalSessionPath },
+				}),
+				JSON.stringify({ id: "status", method: "thread/status" }),
+				"",
+			].join("\n");
+		});
+
+		expect(result.code).toBe(0);
+		const responses = parseJsonLines(result.stdout) as Array<{
+			id?: string;
+			result?: {
+				thread?: { id?: string; path?: string; messages?: Array<{ role?: string; content?: unknown }> };
+				status?: { threadId?: string };
+			};
+		}>;
+		const read = responses.find((response) => response.id === "read");
+		const status = responses.find((response) => response.id === "status");
+		expect(read?.result?.thread).toEqual(
+			expect.objectContaining({
+				id: "historical-read",
+				path: historicalSessionPath,
+				messages: expect.arrayContaining([
+					expect.objectContaining({ role: "user", content: "preview this thread" }),
+				]),
+			}),
+		);
+		expect(status?.result?.status?.threadId).not.toBe("historical-read");
 	});
 
 	test("pi app-server archives a session over stdio", async () => {
