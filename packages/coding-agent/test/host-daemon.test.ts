@@ -209,4 +209,153 @@ describe("host daemon", () => {
 			await daemon.stop();
 		}
 	});
+
+	test("refuses to open workspaces outside the allowlist", async () => {
+		const daemon = await startHostDaemon(["--token", "secret-token", "--listen", "127.0.0.1:0"]);
+
+		try {
+			const response = await rpc(
+				`http://${daemon.host}:${daemon.port}`,
+				{
+					id: "open",
+					method: "workspace/open",
+					params: { path: daemon.dirs.projectDir },
+				},
+				"secret-token",
+			);
+
+			expect(response.status).toBe(400);
+			expect(response.json).toEqual({
+				error: expect.objectContaining({
+					message: expect.stringContaining("allowlisted"),
+				}),
+			});
+		} finally {
+			await daemon.stop();
+		}
+	});
+
+	test("opens an allowlisted workspace app-server and proxies JSON-RPC requests", async () => {
+		const dirs = createDirs();
+		const workspace = realpathSync(dirs.projectDir);
+		const daemon = await startHostDaemon([
+			"--token",
+			"secret-token",
+			"--listen",
+			"127.0.0.1:0",
+			"--workspace",
+			workspace,
+		]);
+
+		try {
+			const baseUrl = `http://${daemon.host}:${daemon.port}`;
+			const listed = await rpc(baseUrl, { id: "workspaces", method: "workspace/list" }, "secret-token");
+			const workspaceId = (
+				listed.json as { result: { workspaces: Array<{ id: string; path: string }> } }
+			).result.workspaces.find((candidate) => candidate.path === workspace)?.id;
+			expect(workspaceId).toEqual(expect.any(String));
+
+			const opened = await rpc(
+				baseUrl,
+				{ id: "open", method: "workspace/open", params: { workspaceId } },
+				"secret-token",
+			);
+			expect(opened.status).toBe(200);
+			expect(opened.json).toEqual({
+				id: "open",
+				result: {
+					process: expect.objectContaining({ pid: expect.any(Number), running: true }),
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const initialized = await rpc(
+				baseUrl,
+				{
+					id: "initialize",
+					method: "workspace/request",
+					params: {
+						workspaceId,
+						request: {
+							id: "app-init",
+							method: "initialize",
+							params: { clientInfo: { name: "host-daemon-test" } },
+						},
+					},
+				},
+				"secret-token",
+			);
+
+			expect(initialized.status).toBe(200);
+			expect(initialized.json).toEqual({
+				id: "initialize",
+				result: {
+					process: expect.objectContaining({ running: true }),
+					response: {
+						id: "app-init",
+						result: expect.objectContaining({
+							protocolVersion: 2,
+							serverInfo: { name: "pi-app-server", version: 2 },
+						}),
+					},
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const status = await rpc(baseUrl, { id: "status", method: "host/status" }, "secret-token");
+			expect(status.json).toEqual({
+				id: "status",
+				result: expect.objectContaining({
+					runningWorkspaceCount: 1,
+					workspaceCount: 1,
+				}),
+			});
+		} finally {
+			await daemon.stop();
+		}
+	});
+
+	test("closes an opened workspace app-server", async () => {
+		const dirs = createDirs();
+		const workspace = realpathSync(dirs.projectDir);
+		const daemon = await startHostDaemon([
+			"--token",
+			"secret-token",
+			"--listen",
+			"127.0.0.1:0",
+			"--workspace",
+			workspace,
+		]);
+
+		try {
+			const baseUrl = `http://${daemon.host}:${daemon.port}`;
+			const listed = await rpc(baseUrl, { id: "workspaces", method: "workspace/list" }, "secret-token");
+			const workspaceId = (
+				listed.json as { result: { workspaces: Array<{ id: string; path: string }> } }
+			).result.workspaces.find((candidate) => candidate.path === workspace)?.id;
+
+			await rpc(baseUrl, { id: "open", method: "workspace/open", params: { workspaceId } }, "secret-token");
+			const closed = await rpc(
+				baseUrl,
+				{ id: "close", method: "workspace/close", params: { workspaceId } },
+				"secret-token",
+			);
+			expect(closed.status).toBe(200);
+			expect(closed.json).toEqual({
+				id: "close",
+				result: {
+					process: expect.objectContaining({ running: false, stoppedAt: expect.any(String) }),
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const hostStatus = await rpc(baseUrl, { id: "status", method: "host/status" }, "secret-token");
+			expect(hostStatus.json).toEqual({
+				id: "status",
+				result: expect.objectContaining({ runningWorkspaceCount: 0 }),
+			});
+		} finally {
+			await daemon.stop();
+		}
+	});
 });

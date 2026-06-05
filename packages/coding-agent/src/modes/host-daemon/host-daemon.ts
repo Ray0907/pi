@@ -1,7 +1,9 @@
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { basename, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 type HostDaemonRequestId = string | number | null | undefined;
 
@@ -22,8 +24,56 @@ interface HostDaemonOptions {
 		host: string;
 		port: number;
 	};
+	appServerArgs: string[];
 	token: string;
 	workspaces: HostDaemonWorkspace[];
+}
+
+interface HostDaemonContext {
+	options: HostDaemonOptions;
+	server: Server;
+	workspaces: WorkspaceRuntimeManager;
+}
+
+interface WorkspaceOpenParams {
+	workspaceId?: string;
+	path?: string;
+}
+
+interface WorkspaceRequestParams extends WorkspaceOpenParams {
+	request?: unknown;
+}
+
+interface WorkspaceEventsParams extends WorkspaceOpenParams {
+	afterSequence?: number;
+	limit?: number;
+}
+
+interface AppServerRequest {
+	id?: string | number | null;
+	method: string;
+	params?: unknown;
+}
+
+interface PendingRequest {
+	reject: (error: Error) => void;
+	resolve: (value: unknown) => void;
+	timeout: NodeJS.Timeout;
+}
+
+interface WorkspaceEvent {
+	sequence: number;
+	timestamp: string;
+	event: unknown;
+}
+
+interface WorkspaceProcessSnapshot {
+	pid?: number;
+	running: boolean;
+	startedAt?: string;
+	stoppedAt?: string;
+	stderrTail: string;
+	eventSequence: number;
 }
 
 const DEFAULT_LISTEN = "127.0.0.1:4732";
@@ -69,10 +119,12 @@ function parseHostDaemonOptions(args: string[], cwd = process.cwd()): HostDaemon
 	let token = process.env.PI_HOST_TOKEN ?? "";
 	const workspaces: HostDaemonWorkspace[] = [];
 	let allowNonLocalhost = false;
+	const appServerArgs: string[] = [];
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
 		if (arg === "--offline") {
+			appServerArgs.push("--offline");
 			continue;
 		}
 		if (arg === "--listen" && i + 1 < args.length) {
@@ -101,7 +153,7 @@ function parseHostDaemonOptions(args: string[], cwd = process.cwd()): HostDaemon
 		throw new Error("host-daemon only listens on localhost by default; use --allow-non-localhost explicitly");
 	}
 
-	return { listen, token, workspaces };
+	return { appServerArgs, listen, token, workspaces };
 }
 
 function safeTokenEquals(expected: string, actual: string): boolean {
@@ -150,7 +202,341 @@ function readBody(request: IncomingMessage): Promise<string> {
 	});
 }
 
-function handleRpc(request: HostDaemonRequest, options: HostDaemonOptions, server: Server): unknown {
+function parseWorkspaceParams(params: unknown): WorkspaceOpenParams {
+	if (typeof params !== "object" || params === null) {
+		throw new Error("Expected params to include workspaceId or path");
+	}
+	const value = params as { path?: unknown; workspaceId?: unknown };
+	if (value.workspaceId !== undefined && typeof value.workspaceId !== "string") {
+		throw new Error("Expected params.workspaceId to be a string");
+	}
+	if (value.path !== undefined && typeof value.path !== "string") {
+		throw new Error("Expected params.path to be a string");
+	}
+	return { path: value.path, workspaceId: value.workspaceId };
+}
+
+function parseWorkspaceRequestParams(params: unknown): WorkspaceRequestParams {
+	const workspace = parseWorkspaceParams(params);
+	const value = params as { request?: unknown };
+	return { ...workspace, request: value.request };
+}
+
+function parseWorkspaceEventsParams(params: unknown): WorkspaceEventsParams {
+	const workspace = parseWorkspaceParams(params);
+	const value = params as { afterSequence?: unknown; limit?: unknown };
+	const afterSequence = value.afterSequence;
+	const limit = value.limit;
+	if (afterSequence !== undefined && (typeof afterSequence !== "number" || !Number.isInteger(afterSequence))) {
+		throw new Error("Expected params.afterSequence to be an integer");
+	}
+	if (limit !== undefined && (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 1000)) {
+		throw new Error("Expected params.limit to be an integer from 1 to 1000");
+	}
+	return { ...workspace, afterSequence, limit };
+}
+
+function parseAppServerRequest(value: unknown): AppServerRequest {
+	if (typeof value !== "object" || value === null || !("method" in value)) {
+		throw new Error("Expected params.request to be a JSON-RPC request object with a method");
+	}
+	const request = value as { id?: unknown; method: unknown; params?: unknown };
+	if (typeof request.method !== "string") {
+		throw new Error("Expected params.request.method to be a string");
+	}
+	if (
+		request.id !== undefined &&
+		request.id !== null &&
+		typeof request.id !== "string" &&
+		typeof request.id !== "number"
+	) {
+		throw new Error("Expected params.request.id to be a string, number, null, or omitted");
+	}
+	return { id: request.id, method: request.method, params: request.params };
+}
+
+function getCliSpawnArgs(): string[] {
+	const args = process.argv.slice(1);
+	const hostDaemonIndex = args.indexOf("host-daemon");
+	const cliArgs = hostDaemonIndex > 0 ? args.slice(0, hostDaemonIndex) : args.slice(0, 1);
+	const [entrypoint] = cliArgs;
+	if (cliArgs.length === 1 && entrypoint?.endsWith(".ts")) {
+		const moduleDir = dirname(fileURLToPath(import.meta.url));
+		const tsxCli = resolve(moduleDir, "../../../../../node_modules/tsx/dist/cli.mjs");
+		if (existsSync(tsxCli)) {
+			return [tsxCli, entrypoint];
+		}
+	}
+	return cliArgs;
+}
+
+function tailText(value: string, maxLength = 4000): string {
+	return value.length <= maxLength ? value : value.slice(value.length - maxLength);
+}
+
+class WorkspaceRuntime {
+	private buffer = "";
+	private eventSequence = 0;
+	private readonly events: WorkspaceEvent[] = [];
+	private readonly pending = new Map<string, PendingRequest>();
+	private readonly closeWaiters = new Set<() => void>();
+	private requestSequence = 0;
+	private stderrTail = "";
+	private stoppedAt: string | undefined;
+	private readonly appServerArgs: string[];
+
+	child: ChildProcessWithoutNullStreams;
+	readonly startedAt = new Date().toISOString();
+	readonly workspace: HostDaemonWorkspace;
+
+	constructor(workspace: HostDaemonWorkspace, appServerArgs: string[]) {
+		this.appServerArgs = appServerArgs;
+		this.workspace = workspace;
+		const cliArgs = getCliSpawnArgs();
+		this.child = spawn(process.execPath, [...cliArgs, "app-server", ...this.appServerArgs], {
+			cwd: workspace.path,
+			env: process.env,
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		this.child.stdout.setEncoding("utf8");
+		this.child.stderr.setEncoding("utf8");
+		this.child.stdout.on("data", (chunk) => this.handleStdout(chunk));
+		this.child.stderr.on("data", (chunk) => {
+			this.stderrTail = tailText(`${this.stderrTail}${chunk}`);
+		});
+		this.child.once("close", () => this.markStopped());
+		this.child.once("error", (error) => this.markStopped(error));
+	}
+
+	get running(): boolean {
+		return this.child.exitCode === null && this.child.signalCode === null && !this.stoppedAt;
+	}
+
+	snapshot(): WorkspaceProcessSnapshot {
+		return {
+			eventSequence: this.eventSequence,
+			pid: this.child.pid,
+			running: this.running,
+			startedAt: this.startedAt,
+			stderrTail: this.stderrTail,
+			stoppedAt: this.stoppedAt,
+		};
+	}
+
+	getEvents(afterSequence = 0, limit = 100): WorkspaceEvent[] {
+		return this.events.filter((event) => event.sequence > afterSequence).slice(0, limit);
+	}
+
+	async request(request: AppServerRequest, timeoutMs = 30_000): Promise<unknown> {
+		if (!this.running) {
+			throw new Error("Workspace app-server is not running");
+		}
+		const id = request.id ?? `host-${++this.requestSequence}`;
+		const forwarded = { ...request, id };
+		const key = String(id);
+		if (this.pending.has(key)) {
+			throw new Error(`Duplicate app-server request id: ${key}`);
+		}
+
+		return await new Promise((resolvePromise, reject) => {
+			const timeout = setTimeout(() => {
+				this.pending.delete(key);
+				reject(new Error(`Timed out waiting for app-server response: ${key}`));
+			}, timeoutMs);
+			this.pending.set(key, { reject, resolve: resolvePromise, timeout });
+			this.child.stdin.write(`${JSON.stringify(forwarded)}\n`, (error) => {
+				if (!error) return;
+				clearTimeout(timeout);
+				this.pending.delete(key);
+				reject(error);
+			});
+		});
+	}
+
+	async close(): Promise<WorkspaceProcessSnapshot> {
+		if (!this.running) {
+			return this.snapshot();
+		}
+		try {
+			await this.request({ id: `host-shutdown-${++this.requestSequence}`, method: "server/shutdown" }, 2_000);
+			await this.waitForExit(2_000);
+		} catch {
+			this.child.kill("SIGTERM");
+			await this.waitForExit(2_000);
+		}
+		if (this.running) {
+			this.child.kill("SIGKILL");
+			await this.waitForExit(1_000);
+		}
+		return this.snapshot();
+	}
+
+	private handleStdout(chunk: string): void {
+		this.buffer += chunk;
+		for (;;) {
+			const newline = this.buffer.indexOf("\n");
+			if (newline < 0) break;
+			const line = this.buffer.slice(0, newline).trim();
+			this.buffer = this.buffer.slice(newline + 1);
+			if (!line) continue;
+			this.handleJsonLine(line);
+		}
+	}
+
+	private handleJsonLine(line: string): void {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(line);
+		} catch {
+			this.recordEvent({ method: "workspace/stdout", params: { line } });
+			return;
+		}
+
+		if (typeof parsed === "object" && parsed !== null && "id" in parsed) {
+			const id = (parsed as { id?: unknown }).id;
+			const pending = this.pending.get(String(id));
+			if (pending) {
+				clearTimeout(pending.timeout);
+				this.pending.delete(String(id));
+				pending.resolve(parsed);
+				return;
+			}
+		}
+		this.recordEvent(parsed);
+	}
+
+	private recordEvent(event: unknown): void {
+		this.events.push({ event, sequence: ++this.eventSequence, timestamp: new Date().toISOString() });
+		while (this.events.length > 1000) {
+			this.events.shift();
+		}
+	}
+
+	private markStopped(error?: Error): void {
+		this.stoppedAt = new Date().toISOString();
+		if (error) {
+			this.stderrTail = tailText(`${this.stderrTail}${error.message}`);
+		}
+		for (const [id, pending] of this.pending) {
+			clearTimeout(pending.timeout);
+			pending.reject(new Error(`Workspace app-server exited before response: ${id}`));
+		}
+		this.pending.clear();
+		for (const waiter of this.closeWaiters) {
+			waiter();
+		}
+		this.closeWaiters.clear();
+	}
+
+	private async waitForExit(timeoutMs: number): Promise<void> {
+		if (!this.running) return;
+		await new Promise<void>((resolvePromise) => {
+			let timeout: NodeJS.Timeout;
+			const waiter = () => {
+				clearTimeout(timeout);
+				resolvePromise();
+			};
+			timeout = setTimeout(() => {
+				this.closeWaiters.delete(waiter);
+				resolvePromise();
+			}, timeoutMs);
+			this.closeWaiters.add(waiter);
+		});
+	}
+}
+
+class WorkspaceRuntimeManager {
+	private readonly options: HostDaemonOptions;
+	private readonly runtimes = new Map<string, WorkspaceRuntime>();
+
+	constructor(options: HostDaemonOptions) {
+		this.options = options;
+	}
+
+	list(): Array<HostDaemonWorkspace & { process?: WorkspaceProcessSnapshot }> {
+		return this.options.workspaces.map((workspace) => ({
+			...workspace,
+			process: this.runtimes.get(workspace.id)?.snapshot(),
+		}));
+	}
+
+	resolve(params: WorkspaceOpenParams): HostDaemonWorkspace {
+		if (params.workspaceId) {
+			const workspace = this.options.workspaces.find((candidate) => candidate.id === params.workspaceId);
+			if (!workspace) {
+				throw new Error(`Workspace is not allowlisted: ${params.workspaceId}`);
+			}
+			return workspace;
+		}
+		if (params.path) {
+			const realPath = realpathSync(resolve(params.path));
+			const workspace = this.options.workspaces.find((candidate) => candidate.path === realPath);
+			if (!workspace) {
+				throw new Error(`Workspace is not allowlisted: ${params.path}`);
+			}
+			return workspace;
+		}
+		throw new Error("Expected params.workspaceId or params.path");
+	}
+
+	open(params: WorkspaceOpenParams): { process: WorkspaceProcessSnapshot; workspace: HostDaemonWorkspace } {
+		const workspace = this.resolve(params);
+		let runtime = this.runtimes.get(workspace.id);
+		if (!runtime || !runtime.running) {
+			runtime = new WorkspaceRuntime(workspace, this.options.appServerArgs);
+			this.runtimes.set(workspace.id, runtime);
+		}
+		return { process: runtime.snapshot(), workspace };
+	}
+
+	status(params: WorkspaceOpenParams): { process?: WorkspaceProcessSnapshot; workspace: HostDaemonWorkspace } {
+		const workspace = this.resolve(params);
+		return { process: this.runtimes.get(workspace.id)?.snapshot(), workspace };
+	}
+
+	async request(params: WorkspaceRequestParams): Promise<{
+		response: unknown;
+		workspace: HostDaemonWorkspace;
+		process: WorkspaceProcessSnapshot;
+	}> {
+		const opened = this.open(params);
+		const runtime = this.runtimes.get(opened.workspace.id);
+		if (!runtime) {
+			throw new Error("Workspace app-server failed to start");
+		}
+		const response = await runtime.request(parseAppServerRequest(params.request));
+		return { process: runtime.snapshot(), response, workspace: opened.workspace };
+	}
+
+	events(params: WorkspaceEventsParams): {
+		events: WorkspaceEvent[];
+		process?: WorkspaceProcessSnapshot;
+		workspace: HostDaemonWorkspace;
+	} {
+		const workspace = this.resolve(params);
+		const runtime = this.runtimes.get(workspace.id);
+		return {
+			events: runtime?.getEvents(params.afterSequence, params.limit ?? 100) ?? [],
+			process: runtime?.snapshot(),
+			workspace,
+		};
+	}
+
+	async close(
+		params: WorkspaceOpenParams,
+	): Promise<{ process?: WorkspaceProcessSnapshot; workspace: HostDaemonWorkspace }> {
+		const workspace = this.resolve(params);
+		const runtime = this.runtimes.get(workspace.id);
+		return { process: await runtime?.close(), workspace };
+	}
+
+	async closeAll(): Promise<void> {
+		await Promise.all([...this.runtimes.values()].map((runtime) => runtime.close()));
+	}
+}
+
+async function handleRpc(request: HostDaemonRequest, context: HostDaemonContext): Promise<unknown> {
+	const { options, server, workspaces } = context;
 	switch (request.method) {
 		case "host/status":
 			return {
@@ -159,6 +545,7 @@ function handleRpc(request: HostDaemonRequest, options: HostDaemonOptions, serve
 					daemon: "pi-host-daemon",
 					protocolVersion: 1,
 					listen: options.listen,
+					runningWorkspaceCount: workspaces.list().filter((workspace) => workspace.process?.running).length,
 					workspaceCount: options.workspaces.length,
 				},
 			};
@@ -166,11 +553,23 @@ function handleRpc(request: HostDaemonRequest, options: HostDaemonOptions, serve
 			return {
 				id: request.id,
 				result: {
-					workspaces: options.workspaces,
+					workspaces: workspaces.list(),
 				},
 			};
+		case "workspace/open":
+			return { id: request.id, result: workspaces.open(parseWorkspaceParams(request.params)) };
+		case "workspace/status":
+			return { id: request.id, result: workspaces.status(parseWorkspaceParams(request.params)) };
+		case "workspace/request":
+			return { id: request.id, result: await workspaces.request(parseWorkspaceRequestParams(request.params)) };
+		case "workspace/events":
+			return { id: request.id, result: workspaces.events(parseWorkspaceEventsParams(request.params)) };
+		case "workspace/close":
+			return { id: request.id, result: await workspaces.close(parseWorkspaceParams(request.params)) };
 		case "server/shutdown":
-			setTimeout(() => server.close(() => process.exit(0)), 0);
+			setTimeout(() => {
+				void workspaces.closeAll().finally(() => server.close(() => process.exit(0)));
+			}, 0);
 			return { id: request.id, result: { shuttingDown: true } };
 		default:
 			return { id: request.id, error: { code: -32601, message: `Unknown method: ${request.method}` } };
@@ -180,6 +579,7 @@ function handleRpc(request: HostDaemonRequest, options: HostDaemonOptions, serve
 export async function runHostDaemon(args: string[], cwd = process.cwd()): Promise<never> {
 	const options = parseHostDaemonOptions(args, cwd);
 	let server: Server;
+	const workspaces = new WorkspaceRuntimeManager(options);
 
 	server = createServer(async (request, response) => {
 		if (request.method !== "POST" || request.url !== "/rpc") {
@@ -197,7 +597,7 @@ export async function runHostDaemon(args: string[], cwd = process.cwd()): Promis
 		try {
 			const body = await readBody(request);
 			const parsed = parseRequest(JSON.parse(body));
-			writeJson(response, 200, handleRpc(parsed, options, server));
+			writeJson(response, 200, await handleRpc(parsed, { options, server, workspaces }));
 		} catch (error) {
 			writeJson(response, 400, {
 				error: { code: -32700, message: error instanceof Error ? error.message : String(error) },
@@ -218,7 +618,9 @@ export async function runHostDaemon(args: string[], cwd = process.cwd()): Promis
 		});
 	});
 
-	const shutdown = () => server.close(() => process.exit(0));
+	const shutdown = () => {
+		void workspaces.closeAll().finally(() => server.close(() => process.exit(0)));
+	};
 	process.once("SIGTERM", shutdown);
 	if (process.platform !== "win32") {
 		process.once("SIGHUP", shutdown);
