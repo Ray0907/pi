@@ -19,12 +19,16 @@ const tempDirs: string[] = [];
 
 function createRuntime(
 	harness: Harness,
-): Pick<AgentSessionRuntime, "cwd" | "session" | "newSession" | "switchSession"> {
+): Pick<AgentSessionRuntime, "cwd" | "session" | "newSession" | "switchSession" | "fork"> {
 	return {
 		cwd: harness.tempDir,
 		session: harness.session,
 		newSession: async () => ({ cancelled: false }),
 		switchSession: async () => ({ cancelled: false }),
+		fork: async (entryId) => ({
+			cancelled: false,
+			selectedText: harness.session.getUserMessagesForForking().find((message) => message.entryId === entryId)?.text,
+		}),
 	};
 }
 
@@ -236,7 +240,11 @@ describe("app-server v2 protocol", () => {
 						"initialize",
 						"server/capabilities",
 						"server/status",
+						"server/shutdown",
 						"thread/list",
+						"thread/fork",
+						"thread/fork/messages",
+						"thread/clone",
 						"usage/session",
 						"usage/thread",
 						"turn/start",
@@ -249,6 +257,8 @@ describe("app-server v2 protocol", () => {
 						"item/toolCall/started",
 						"item/diff/available",
 						"approval/requested",
+						"thread/renamed",
+						"thread/forked",
 					]),
 				},
 			},
@@ -277,6 +287,18 @@ describe("app-server v2 protocol", () => {
 					eventSequence: 0,
 				}),
 			},
+		});
+	});
+
+	test("acknowledges graceful server shutdown requests", async () => {
+		harness = createHarness();
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+
+		const response = await protocol.handleRequest({ id: "shutdown", method: "server/shutdown" });
+
+		expect(response).toEqual({
+			id: "shutdown",
+			result: { shuttingDown: true },
 		});
 	});
 
@@ -387,6 +409,59 @@ describe("app-server v2 protocol", () => {
 			params: { approvalId: approval?.params.approvalId, confirmed: false },
 		});
 		await expect(confirmPromise).resolves.toBe(false);
+	});
+
+	test("renames the current thread server-side and emits metadata notification", async () => {
+		harness = createHarness();
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+
+		const response = await protocol.handleRequest({
+			id: "rename",
+			method: "thread/name/set",
+			params: { name: "Desktop Thread" },
+		});
+
+		expect(response).toEqual({
+			id: "rename",
+			result: {
+				thread: expect.objectContaining({
+					id: harness.session.sessionId,
+					name: "Desktop Thread",
+				}),
+			},
+		});
+		expect(notifications).toEqual([
+			expect.objectContaining({
+				method: "thread/renamed",
+				params: {
+					threadId: harness.session.sessionId,
+					sessionPath: harness.session.sessionFile,
+					name: "Desktop Thread",
+				},
+			}),
+		]);
+	});
+
+	test("emits thread rename notifications for session info changes outside requests", async () => {
+		harness = createHarness();
+		const notifications: AppServerNotification[] = [];
+		new AppServerProtocol(createRuntime(harness), (notification) => notifications.push(notification));
+
+		harness.session.setSessionName("Extension Named Thread");
+
+		expect(notifications).toEqual([
+			expect.objectContaining({
+				method: "thread/renamed",
+				params: {
+					threadId: harness.session.sessionId,
+					sessionPath: harness.session.sessionFile,
+					name: "Extension Named Thread",
+				},
+			}),
+		]);
 	});
 
 	test("pins and unpins sessions server-side", async () => {
@@ -514,6 +589,79 @@ describe("app-server v2 protocol", () => {
 				threads: expect.arrayContaining([expect.objectContaining({ id: harness.session.sessionId })]),
 			},
 		});
+	});
+
+	test("lists forkable messages and forks the active thread from a selected message", async () => {
+		harness = createHarness({ responses: ["fork response"] });
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+		await protocol.handleRequest({ id: "turn-before-fork", method: "turn/start", params: { message: "fork me" } });
+		await protocol.waitForIdle();
+
+		const messages = await protocol.handleRequest({ id: "fork-messages", method: "thread/fork/messages" });
+		const forkable = (messages as { result: { messages: Array<{ entryId: string; text: string }> } }).result.messages;
+		const forked = await protocol.handleRequest({
+			id: "fork",
+			method: "thread/fork",
+			params: { entryId: forkable[0]?.entryId },
+		});
+
+		expect(messages).toEqual({
+			id: "fork-messages",
+			result: { messages: [expect.objectContaining({ entryId: expect.any(String), text: "fork me" })] },
+		});
+		expect(forked).toEqual({
+			id: "fork",
+			result: {
+				cancelled: false,
+				selectedText: "fork me",
+				thread: expect.objectContaining({ id: harness.session.sessionId }),
+			},
+		});
+		expect(notifications).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					method: "thread/forked",
+					params: expect.objectContaining({
+						threadId: harness.session.sessionId,
+						selectedText: "fork me",
+					}),
+				}),
+			]),
+		);
+	});
+
+	test("clones the active thread from the current leaf", async () => {
+		harness = createHarness({ responses: ["clone response"] });
+		const notifications: AppServerNotification[] = [];
+		const protocol = new AppServerProtocol(createRuntime(harness), (notification) =>
+			notifications.push(notification),
+		);
+		await protocol.handleRequest({ id: "turn-before-clone", method: "turn/start", params: { message: "clone me" } });
+		await protocol.waitForIdle();
+
+		const cloned = await protocol.handleRequest({ id: "clone", method: "thread/clone" });
+
+		expect(cloned).toEqual({
+			id: "clone",
+			result: {
+				cancelled: false,
+				thread: expect.objectContaining({ id: harness.session.sessionId }),
+			},
+		});
+		expect(notifications).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					method: "thread/forked",
+					params: expect.objectContaining({
+						threadId: harness.session.sessionId,
+						position: "at",
+					}),
+				}),
+			]),
+		);
 	});
 
 	test("replays recorded session events after a sequence", async () => {
@@ -644,6 +792,11 @@ describe("app-server v2 protocol", () => {
 			.map((notification) => notification.params.delta)
 			.join("");
 		expect(textDeltas).toBe("hello from app server");
+		expect(
+			notifications
+				.filter((notification) => notification.method.startsWith("item/"))
+				.every((notification) => notification.params.turnId === turnId),
+		).toBe(true);
 
 		const completedItem = notifications.find(
 			(notification) => notification.method === "item/completed" && notification.params.role === "assistant",
@@ -766,6 +919,7 @@ describe("app-server v2 protocol", () => {
 
 		expect(toolStarted?.params).toMatchObject({
 			threadId: harness.session.sessionId,
+			turnId: expect.any(String),
 			itemId: "tool-1",
 			toolCallId: "tool-1",
 			toolName: "echo",
@@ -773,6 +927,7 @@ describe("app-server v2 protocol", () => {
 		});
 		expect(toolUpdated?.params).toMatchObject({
 			threadId: harness.session.sessionId,
+			turnId: toolStarted?.params.turnId,
 			itemId: "tool-1",
 			toolCallId: "tool-1",
 			toolName: "echo",
@@ -780,6 +935,7 @@ describe("app-server v2 protocol", () => {
 		});
 		expect(toolCompleted?.params).toMatchObject({
 			threadId: harness.session.sessionId,
+			turnId: toolStarted?.params.turnId,
 			itemId: "tool-1",
 			toolCallId: "tool-1",
 			toolName: "echo",
@@ -823,6 +979,7 @@ describe("app-server v2 protocol", () => {
 		const diffAvailable = notifications.find((notification) => notification.method === "item/diff/available");
 		expect(diffAvailable?.params).toMatchObject({
 			threadId: harness.session.sessionId,
+			turnId: expect.any(String),
 			itemId: "edit-1",
 			toolCallId: "edit-1",
 			toolName: "edit",
@@ -960,6 +1117,62 @@ describe("app-server v2 protocol", () => {
 		expect(response.result.protocolVersion).toBe(2);
 	});
 
+	test("pi app-server exits cleanly after server/shutdown over stdio", async () => {
+		const result = await runAppServerCli(
+			[
+				JSON.stringify({ id: "init", method: "initialize", params: { clientInfo: { name: "smoke" } } }),
+				JSON.stringify({ id: "shutdown", method: "server/shutdown" }),
+				"",
+			].join("\n"),
+		);
+
+		expect(result.code).toBe(0);
+		const responses = parseJsonLines(result.stdout) as Array<{
+			id?: string;
+			result?: { shuttingDown?: boolean; protocolVersion?: number };
+		}>;
+		expect(responses.find((response) => response.id === "init")?.result?.protocolVersion).toBe(2);
+		expect(responses.find((response) => response.id === "shutdown")?.result?.shuttingDown).toBe(true);
+	});
+
+	test("pi app-server exposes lifecycle and usage methods over stdio", async () => {
+		const result = await runAppServerCli(
+			[
+				JSON.stringify({ id: "status", method: "server/status" }),
+				JSON.stringify({ id: "session-usage", method: "usage/session" }),
+				JSON.stringify({ id: "thread-usage", method: "usage/thread" }),
+				"",
+			].join("\n"),
+		);
+
+		expect(result.code).toBe(0);
+		const responses = parseJsonLines(result.stdout) as Array<{
+			id?: string;
+			result?: {
+				protocolVersion?: number;
+				pid?: number;
+				connected?: boolean;
+				status?: { threadId?: string; running?: boolean };
+				usage?: { sessionId?: string; totalMessages?: number };
+			};
+		}>;
+		const status = responses.find((response) => response.id === "status");
+		expect(status?.result).toEqual(
+			expect.objectContaining({
+				protocolVersion: 2,
+				pid: expect.any(Number),
+				connected: true,
+				status: expect.objectContaining({ threadId: expect.any(String), running: false }),
+			}),
+		);
+		expect(responses.find((response) => response.id === "session-usage")?.result?.usage).toEqual(
+			expect.objectContaining({ sessionId: status?.result?.status?.threadId, totalMessages: 0 }),
+		);
+		expect(responses.find((response) => response.id === "thread-usage")?.result?.usage).toEqual(
+			expect.objectContaining({ sessionId: status?.result?.status?.threadId, totalMessages: 0 }),
+		);
+	});
+
 	test("pi app-server returns a structured turn/start error when no model is selected", async () => {
 		const result = await runAppServerCli(
 			`${JSON.stringify({ id: "turn", method: "turn/start", params: { message: "hi" } })}\n`,
@@ -1007,6 +1220,50 @@ describe("app-server v2 protocol", () => {
 		);
 		expect(statusResponse?.result.thread).toEqual(
 			expect.objectContaining({ id: statusResponse?.result.status?.threadId, messageCount: 0 }),
+		);
+	});
+
+	test("pi app-server renames, pins, and searches the current thread over stdio", async () => {
+		const result = await runAppServerCli(
+			[
+				JSON.stringify({ id: "rename", method: "thread/name/set", params: { name: "Pinned Desktop Thread" } }),
+				JSON.stringify({ id: "pin", method: "thread/pin", params: { pinned: true } }),
+				JSON.stringify({ id: "search", method: "thread/search", params: { query: "pinned desktop" } }),
+				"",
+			].join("\n"),
+		);
+
+		expect(result.code).toBe(0);
+		const responses = parseJsonLines(result.stdout) as Array<{
+			id?: string;
+			method?: string;
+			result?: {
+				pinned?: boolean;
+				thread?: { id?: string; name?: string; pinned?: boolean };
+				threads?: Array<{ id?: string; name?: string; pinned?: boolean }>;
+			};
+		}>;
+		const rename = responses.find((response) => response.id === "rename");
+		const pin = responses.find((response) => response.id === "pin");
+		const search = responses.find((response) => response.id === "search");
+
+		expect(rename?.result?.thread).toEqual(expect.objectContaining({ name: "Pinned Desktop Thread" }));
+		expect(pin?.result).toEqual(
+			expect.objectContaining({
+				pinned: true,
+				thread: expect.objectContaining({ id: rename?.result?.thread?.id, pinned: true }),
+			}),
+		);
+		expect(search?.result?.threads).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ id: rename?.result?.thread?.id, name: "Pinned Desktop Thread", pinned: true }),
+			]),
+		);
+		expect(responses).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ method: "thread/renamed" }),
+				expect.objectContaining({ method: "thread/pinned" }),
+			]),
 		);
 	});
 

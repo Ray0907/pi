@@ -17,7 +17,7 @@ import type {
 	AppServerThreadSummary,
 } from "./app-server-types.ts";
 
-type AppServerRuntime = Pick<AgentSessionRuntime, "cwd" | "session" | "newSession" | "switchSession">;
+type AppServerRuntime = Pick<AgentSessionRuntime, "cwd" | "session" | "newSession" | "switchSession" | "fork">;
 
 type NotificationSink = (notification: AppServerNotification) => void;
 
@@ -31,6 +31,7 @@ const SUPPORTED_METHODS = [
 	"initialize",
 	"server/capabilities",
 	"server/status",
+	"server/shutdown",
 	"session/events",
 	"workspace/status",
 	"thread/list",
@@ -42,6 +43,9 @@ const SUPPORTED_METHODS = [
 	"thread/archive",
 	"thread/pin",
 	"thread/search",
+	"thread/fork/messages",
+	"thread/fork",
+	"thread/clone",
 	"turn/status",
 	"turn/start",
 	"turn/interrupt",
@@ -67,6 +71,8 @@ const SUPPORTED_NOTIFICATIONS = [
 	"item/toolCall/completed",
 	"item/diff/available",
 	"approval/requested",
+	"thread/renamed",
+	"thread/forked",
 	"thread/archived",
 	"thread/pinned",
 	"notification/show",
@@ -379,6 +385,13 @@ export class AppServerProtocol {
 		);
 	}
 
+	private getTurnEventScope(): Record<string, unknown> {
+		return {
+			threadId: this.runtime.session.sessionId,
+			turnId: this.activeTurnId,
+		};
+	}
+
 	private createApprovalPromise<T>(
 		opts: ExtensionUIDialogOptions | undefined,
 		defaultValue: T,
@@ -415,8 +428,9 @@ export class AppServerProtocol {
 
 			this.pendingApprovals.set(approvalId, { resolve: finish });
 			this.emit("approval/requested", {
-				approvalId,
+				...this.getTurnEventScope(),
 				timeout: opts?.timeout,
+				approvalId,
 				...request,
 			});
 		});
@@ -488,7 +502,7 @@ export class AppServerProtocol {
 					this.activeAssistantItemId = itemId;
 				}
 				this.emit("item/started", {
-					threadId: this.runtime.session.sessionId,
+					...this.getTurnEventScope(),
 					itemId,
 					role: event.message.role,
 				});
@@ -502,7 +516,7 @@ export class AppServerProtocol {
 					event.assistantMessageEvent.delta.length > 0
 				) {
 					this.emit("item/agentMessage/delta", {
-						threadId: this.runtime.session.sessionId,
+						...this.getTurnEventScope(),
 						itemId: this.activeAssistantItemId,
 						delta: event.assistantMessageEvent.delta,
 					});
@@ -515,7 +529,7 @@ export class AppServerProtocol {
 						? this.activeAssistantItemId
 						: this.createItemId();
 				this.emit("item/completed", {
-					threadId: this.runtime.session.sessionId,
+					...this.getTurnEventScope(),
 					itemId,
 					role: event.message.role,
 					text: getMessageText(event.message),
@@ -529,7 +543,7 @@ export class AppServerProtocol {
 
 			case "tool_execution_start":
 				this.emit("item/toolCall/started", {
-					threadId: this.runtime.session.sessionId,
+					...this.getTurnEventScope(),
 					itemId: event.toolCallId,
 					toolCallId: event.toolCallId,
 					toolName: event.toolName,
@@ -539,7 +553,7 @@ export class AppServerProtocol {
 
 			case "tool_execution_update":
 				this.emit("item/toolCall/updated", {
-					threadId: this.runtime.session.sessionId,
+					...this.getTurnEventScope(),
 					itemId: event.toolCallId,
 					toolCallId: event.toolCallId,
 					toolName: event.toolName,
@@ -550,7 +564,7 @@ export class AppServerProtocol {
 
 			case "tool_execution_end":
 				this.emit("item/toolCall/completed", {
-					threadId: this.runtime.session.sessionId,
+					...this.getTurnEventScope(),
 					itemId: event.toolCallId,
 					toolCallId: event.toolCallId,
 					toolName: event.toolName,
@@ -561,7 +575,7 @@ export class AppServerProtocol {
 					const diffDetails = getDiffDetails(event.result);
 					if (diffDetails) {
 						this.emit("item/diff/available", {
-							threadId: this.runtime.session.sessionId,
+							...this.getTurnEventScope(),
 							itemId: event.toolCallId,
 							toolCallId: event.toolCallId,
 							toolName: event.toolName,
@@ -583,6 +597,14 @@ export class AppServerProtocol {
 				});
 				this.activeTurnId = undefined;
 				this.activeTurnStartedAt = undefined;
+				break;
+
+			case "session_info_changed":
+				this.emit("thread/renamed", {
+					threadId: this.runtime.session.sessionId,
+					sessionPath: this.runtime.session.sessionFile,
+					name: event.name,
+				});
 				break;
 		}
 	}
@@ -610,6 +632,9 @@ export class AppServerProtocol {
 					connected: true,
 					status: this.getStatus(),
 				});
+
+			case "server/shutdown":
+				return success(request.id, { shuttingDown: true });
 
 			case "session/events": {
 				const rawSince = getRecordParams(request.params).since;
@@ -669,6 +694,66 @@ export class AppServerProtocol {
 				return success(request.id, { threads });
 			}
 
+			case "thread/fork/messages":
+				return success(request.id, { messages: this.runtime.session.getUserMessagesForForking() });
+
+			case "thread/fork": {
+				const entryId = getStringParam(request.params, "entryId");
+				if (!entryId) {
+					return error(request.id, -32602, "thread/fork requires params.entryId");
+				}
+				const requestedPosition = getStringParam(request.params, "position");
+				const position = requestedPosition === "at" ? "at" : "before";
+				const previousThreadId = this.runtime.session.sessionId;
+				const previousSessionPath = this.runtime.session.sessionFile;
+				const result = await this.runtime.fork(entryId, { position });
+				if (!result.cancelled) {
+					await this.bindExtensions();
+				}
+				this.emit("thread/forked", {
+					previousThreadId,
+					previousSessionPath,
+					threadId: this.runtime.session.sessionId,
+					sessionPath: this.runtime.session.sessionFile,
+					entryId,
+					position,
+					selectedText: result.selectedText,
+					cancelled: result.cancelled,
+				});
+				return success(request.id, {
+					cancelled: result.cancelled,
+					selectedText: result.selectedText,
+					thread: toCurrentThread(this.runtime.session, this.runtime.cwd),
+				});
+			}
+
+			case "thread/clone": {
+				const leafId = this.runtime.session.sessionManager.getLeafId();
+				if (!leafId) {
+					return error(request.id, -32003, "Cannot clone thread: no current entry selected");
+				}
+				const previousThreadId = this.runtime.session.sessionId;
+				const previousSessionPath = this.runtime.session.sessionFile;
+				const result = await this.runtime.fork(leafId, { position: "at" });
+				if (!result.cancelled) {
+					await this.bindExtensions();
+				}
+				this.emit("thread/forked", {
+					previousThreadId,
+					previousSessionPath,
+					threadId: this.runtime.session.sessionId,
+					sessionPath: this.runtime.session.sessionFile,
+					entryId: leafId,
+					position: "at",
+					selectedText: result.selectedText,
+					cancelled: result.cancelled,
+				});
+				return success(request.id, {
+					cancelled: result.cancelled,
+					thread: toCurrentThread(this.runtime.session, this.runtime.cwd),
+				});
+			}
+
 			case "thread/start": {
 				const result = await this.runtime.newSession();
 				if (!result.cancelled) {
@@ -709,7 +794,8 @@ export class AppServerProtocol {
 				if (!name?.trim()) {
 					return error(request.id, -32602, "thread/name/set requires a non-empty params.name");
 				}
-				this.runtime.session.setSessionName(name.trim());
+				const normalizedName = name.trim();
+				this.runtime.session.setSessionName(normalizedName);
 				return success(request.id, { thread: toCurrentThread(this.runtime.session, this.runtime.cwd) });
 			}
 

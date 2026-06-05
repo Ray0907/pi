@@ -84,6 +84,10 @@ export async function runAppServerMode(runtime: AgentSessionRuntime): Promise<ne
 			parsed = JSON.parse(line);
 			const request = parseRequest(parsed);
 			output(await protocol.handleRequest(request));
+			if (request.method === "server/shutdown") {
+				await waitForRawStdoutBackpressure();
+				await shutdown();
+			}
 		} catch (inputError: unknown) {
 			output(parseErrorResponse(inputError instanceof Error ? inputError.message : String(inputError)));
 		}
