@@ -591,6 +591,26 @@ describe("app-server v2 protocol", () => {
 		});
 	});
 
+	test("searches the active thread by full conversation text", async () => {
+		harness = createHarness({ responses: ["assistant-only desktop needle"] });
+		const protocol = new AppServerProtocol(createRuntime(harness), () => {});
+		await protocol.handleRequest({ id: "turn-search", method: "turn/start", params: { message: "ordinary prompt" } });
+		await protocol.waitForIdle();
+
+		const activeByAssistantText = await protocol.handleRequest({
+			id: "search-active-assistant",
+			method: "thread/search",
+			params: { query: "assistant-only desktop" },
+		});
+
+		expect(activeByAssistantText).toEqual({
+			id: "search-active-assistant",
+			result: {
+				threads: expect.arrayContaining([expect.objectContaining({ id: harness.session.sessionId })]),
+			},
+		});
+	});
+
 	test("lists forkable messages and forks the active thread from a selected message", async () => {
 		harness = createHarness({ responses: ["fork response"] });
 		const notifications: AppServerNotification[] = [];
@@ -734,12 +754,12 @@ describe("app-server v2 protocol", () => {
 			new Promise<{ type: "timeout" }>((resolve) => setTimeout(() => resolve({ type: "timeout" }), 50)),
 		]);
 
-		expect(race).toEqual({
-			type: "response",
-			response: {
-				id: "turn-async",
-				result: { accepted: true, threadId: harness.session.sessionId, turnId: expect.any(String) },
-			},
+		if (race.type !== "response") {
+			throw new Error("turn/start did not acknowledge before the turn completed");
+		}
+		expect(race.response).toEqual({
+			id: "turn-async",
+			result: { accepted: true, threadId: harness.session.sessionId, turnId: expect.any(String) },
 		});
 		const turnId = (race.response as { result: { turnId: string } }).result.turnId;
 		const status = await protocol.handleRequest({ id: "turn-status-running", method: "turn/status" });
@@ -1263,6 +1283,30 @@ describe("app-server v2 protocol", () => {
 			expect.arrayContaining([
 				expect.objectContaining({ method: "thread/renamed" }),
 				expect.objectContaining({ method: "thread/pinned" }),
+			]),
+		);
+	});
+
+	test("pi app-server searches historical sessions by full conversation text over stdio", async () => {
+		const result = await runAppServerCli(({ agentDir, projectDir }) => {
+			const resolvedProjectDir = realpathSync(projectDir);
+			const sessionDir = getDefaultSessionDir(resolvedProjectDir, agentDir);
+			const sessionPath = join(sessionDir, "2026-01-02T00-00-00-000Z_historical-search.jsonl");
+			writeSessionFile(sessionPath, resolvedProjectDir, "historical-search", "opening user only");
+			return [
+				JSON.stringify({ id: "search", method: "thread/search", params: { query: "reply to opening" } }),
+				"",
+			].join("\n");
+		});
+
+		expect(result.code).toBe(0);
+		const responses = parseJsonLines(result.stdout) as Array<{
+			id?: string;
+			result?: { threads?: Array<{ id?: string; firstMessage?: string }> };
+		}>;
+		expect(responses.find((response) => response.id === "search")?.result?.threads).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ id: "historical-search", firstMessage: "opening user only" }),
 			]),
 		);
 	});

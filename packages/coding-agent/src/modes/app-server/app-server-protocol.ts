@@ -113,12 +113,12 @@ function getBooleanParam(params: unknown, name: string): boolean | undefined {
 	return typeof value === "boolean" ? value : undefined;
 }
 
-function searchMatches(thread: AppServerThreadSummary, query: string): boolean {
+function searchMatchesSessionInfo(info: SessionInfo, query: string): boolean {
 	const normalized = query.trim().toLowerCase();
 	if (!normalized) {
 		return true;
 	}
-	return [thread.name, thread.firstMessage, thread.id, thread.cwd]
+	return [info.name, info.firstMessage, info.allMessagesText, info.id, info.cwd]
 		.filter((value): value is string => typeof value === "string")
 		.some((value) => value.toLowerCase().includes(normalized));
 }
@@ -270,6 +270,18 @@ function toCurrentThreadSummary(session: AgentSession, cwd = session.sessionMana
 		messageCount: session.messages.length,
 		firstMessage: firstUserMessage ? getMessageText(firstUserMessage) : "",
 	};
+}
+
+function currentThreadSearchMatches(session: AgentSession, cwd: string, query: string): boolean {
+	const normalized = query.trim().toLowerCase();
+	if (!normalized) {
+		return true;
+	}
+	const summary = toCurrentThreadSummary(session, cwd);
+	const allMessagesText = session.messages.map(getMessageText).filter(Boolean).join(" ");
+	return [summary.name, summary.firstMessage, allMessagesText, summary.id, summary.cwd]
+		.filter((value): value is string => typeof value === "string")
+		.some((value) => value.toLowerCase().includes(normalized));
 }
 
 function toCurrentThread(session: AgentSession, cwd = session.sessionManager.getCwd()): AppServerThread {
@@ -682,12 +694,15 @@ export class AppServerProtocol {
 					undefined,
 					{ includeArchived },
 				);
-				let threads = sessions.map(toThreadSummary);
 				const current = toCurrentThreadSummary(this.runtime.session, this.runtime.cwd);
-				if ((includeArchived || current.archived !== true) && !threads.some((thread) => thread.id === current.id)) {
+				let threads = sessions.filter((session) => searchMatchesSessionInfo(session, query)).map(toThreadSummary);
+				threads = threads.filter((thread) => thread.id !== current.id);
+				if (
+					(includeArchived || current.archived !== true) &&
+					currentThreadSearchMatches(this.runtime.session, this.runtime.cwd, query)
+				) {
 					threads.unshift(current);
 				}
-				threads = threads.filter((thread) => searchMatches(thread, query));
 				if (pinnedOnly) {
 					threads = threads.filter((thread) => thread.pinned === true);
 				}
