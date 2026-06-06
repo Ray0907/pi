@@ -1,8 +1,9 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 type HostDaemonRequestId = string | number | null | undefined;
@@ -49,6 +50,10 @@ interface WorkspaceEventsParams extends WorkspaceOpenParams {
 	limit?: number;
 }
 
+interface WorkspaceFileParams extends WorkspaceOpenParams {
+	path?: string;
+}
+
 interface AppServerRequest {
 	id?: string | number | null;
 	method: string;
@@ -77,6 +82,22 @@ interface WorkspaceProcessSnapshot {
 }
 
 const DEFAULT_LISTEN = "127.0.0.1:4732";
+const ignoredDirectories = new Set([
+	".git",
+	".hg",
+	".svn",
+	"node_modules",
+	"dist",
+	"dist-electron",
+	"build",
+	"coverage",
+	".next",
+	".turbo",
+	".vite",
+]);
+const maxFileEntries = 500;
+const maxFileDepth = 5;
+const maxReadBytes = 1024 * 1024;
 
 function parseListen(value: string): { host: string; port: number } {
 	const lastColon = value.lastIndexOf(":");
@@ -244,6 +265,15 @@ function parseWorkspaceEventsParams(params: unknown): WorkspaceEventsParams {
 	return { ...workspace, afterSequence, limit };
 }
 
+function parseWorkspaceFileParams(params: unknown): WorkspaceFileParams {
+	const workspace = parseWorkspaceParams(params);
+	const value = params as { path?: unknown };
+	if (value.path !== undefined && typeof value.path !== "string") {
+		throw new Error("Expected params.path to be a string");
+	}
+	return { ...workspace, path: value.path };
+}
+
 function parseAppServerRequest(value: unknown): AppServerRequest {
 	if (typeof value !== "object" || value === null || !("method" in value)) {
 		throw new Error("Expected params.request to be a JSON-RPC request object with a method");
@@ -280,6 +310,58 @@ function getCliSpawnArgs(): string[] {
 
 function tailText(value: string, maxLength = 4000): string {
 	return value.length <= maxLength ? value : value.slice(value.length - maxLength);
+}
+
+function resolveWorkspacePath(root: string, path: string): string {
+	const resolvedRoot = resolve(root);
+	const resolvedPath = resolve(resolvedRoot, path);
+	const relativePath = relative(resolvedRoot, resolvedPath);
+	if (relativePath.startsWith("..") || isAbsolute(relativePath)) {
+		throw new Error("Path is outside the active workspace");
+	}
+	return resolvedPath;
+}
+
+async function walkWorkspaceFiles(
+	root: string,
+	current: string,
+	depth: number,
+	entries: Array<{ depth: number; name: string; path: string; type: "directory" | "file" }>,
+): Promise<void> {
+	if (entries.length >= maxFileEntries || depth > maxFileDepth) {
+		return;
+	}
+	const children = await readdir(current, { withFileTypes: true });
+	children.sort((a, b) => {
+		if (a.isDirectory() !== b.isDirectory()) {
+			return a.isDirectory() ? -1 : 1;
+		}
+		return a.name.localeCompare(b.name);
+	});
+
+	for (const child of children) {
+		if (entries.length >= maxFileEntries) {
+			return;
+		}
+		if (child.name.startsWith(".") && child.name !== ".github") {
+			continue;
+		}
+		if (child.isDirectory() && ignoredDirectories.has(child.name)) {
+			continue;
+		}
+
+		const absolutePath = resolve(current, child.name);
+		entries.push({
+			depth,
+			name: child.name,
+			path: relative(root, absolutePath),
+			type: child.isDirectory() ? "directory" : "file",
+		});
+
+		if (child.isDirectory()) {
+			await walkWorkspaceFiles(root, absolutePath, depth + 1, entries);
+		}
+	}
 }
 
 class WorkspaceRuntime {
@@ -530,6 +612,35 @@ class WorkspaceRuntimeManager {
 		};
 	}
 
+	async listFiles(params: WorkspaceOpenParams): Promise<{
+		files: Array<{ depth: number; name: string; path: string; type: "directory" | "file" }>;
+		workspace: HostDaemonWorkspace;
+	}> {
+		const workspace = this.resolve(params);
+		const files: Array<{ depth: number; name: string; path: string; type: "directory" | "file" }> = [];
+		await walkWorkspaceFiles(workspace.path, workspace.path, 0, files);
+		return { files, workspace };
+	}
+
+	async readFile(params: WorkspaceFileParams): Promise<{
+		file: { content: string; path: string; truncated: boolean };
+		workspace: HostDaemonWorkspace;
+	}> {
+		const workspace = this.resolve(params);
+		if (!params.path) {
+			throw new Error("Expected params.path");
+		}
+		const absolutePath = resolveWorkspacePath(workspace.path, params.path);
+		const fileStat = await stat(absolutePath);
+		if (!fileStat.isFile()) {
+			throw new Error(`${basename(params.path)} is not a file`);
+		}
+		const buffer = await readFile(absolutePath);
+		const truncated = buffer.length > maxReadBytes;
+		const contentBuffer = truncated ? buffer.subarray(0, maxReadBytes) : buffer;
+		return { file: { content: contentBuffer.toString("utf8"), path: params.path, truncated }, workspace };
+	}
+
 	async close(
 		params: WorkspaceOpenParams,
 	): Promise<{ process?: WorkspaceProcessSnapshot; workspace: HostDaemonWorkspace }> {
@@ -572,6 +683,10 @@ async function handleRpc(request: HostDaemonRequest, context: HostDaemonContext)
 			return { id: request.id, result: await workspaces.request(parseWorkspaceRequestParams(request.params)) };
 		case "workspace/events":
 			return { id: request.id, result: workspaces.events(parseWorkspaceEventsParams(request.params)) };
+		case "workspace/file/list":
+			return { id: request.id, result: await workspaces.listFiles(parseWorkspaceParams(request.params)) };
+		case "workspace/file/read":
+			return { id: request.id, result: await workspaces.readFile(parseWorkspaceFileParams(request.params)) };
 		case "workspace/close":
 			return { id: request.id, result: await workspaces.close(parseWorkspaceParams(request.params)) };
 		case "server/shutdown":

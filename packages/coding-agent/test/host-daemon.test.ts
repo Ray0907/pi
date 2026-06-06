@@ -315,6 +315,74 @@ describe("host daemon", () => {
 		}
 	});
 
+	test("lists and reads files inside an allowlisted workspace", async () => {
+		const dirs = createDirs();
+		const workspace = realpathSync(dirs.projectDir);
+		mkdirSync(join(workspace, "src"), { recursive: true });
+		writeFileSync(join(workspace, "src", "agent.ts"), "export const answer = 42;\n");
+		writeFileSync(join(workspace, ".hidden"), "hidden\n");
+		const daemon = await startHostDaemon([
+			"--token",
+			"secret-token",
+			"--listen",
+			"127.0.0.1:0",
+			"--workspace",
+			workspace,
+		]);
+
+		try {
+			const baseUrl = `http://${daemon.host}:${daemon.port}`;
+			const listed = await rpc(baseUrl, { id: "workspaces", method: "workspace/list" }, "secret-token");
+			const workspaceId = (
+				listed.json as { result: { workspaces: Array<{ id: string; path: string }> } }
+			).result.workspaces.find((candidate) => candidate.path === workspace)?.id;
+
+			const files = await rpc(
+				baseUrl,
+				{ id: "files", method: "workspace/file/list", params: { workspaceId } },
+				"secret-token",
+			);
+			expect(files.status).toBe(200);
+			expect(files.json).toEqual({
+				id: "files",
+				result: {
+					files: [
+						expect.objectContaining({ depth: 0, name: "src", path: "src", type: "directory" }),
+						expect.objectContaining({ depth: 1, name: "agent.ts", path: "src/agent.ts", type: "file" }),
+					],
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+			expect(JSON.stringify(files.json)).not.toContain(".hidden");
+
+			const read = await rpc(
+				baseUrl,
+				{ id: "read", method: "workspace/file/read", params: { workspaceId, path: "src/agent.ts" } },
+				"secret-token",
+			);
+			expect(read.status).toBe(200);
+			expect(read.json).toEqual({
+				id: "read",
+				result: {
+					file: { content: "export const answer = 42;\n", path: "src/agent.ts", truncated: false },
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const outside = await rpc(
+				baseUrl,
+				{ id: "outside", method: "workspace/file/read", params: { workspaceId, path: "../outside.txt" } },
+				"secret-token",
+			);
+			expect(outside.status).toBe(400);
+			expect(outside.json).toEqual({
+				error: expect.objectContaining({ message: expect.stringContaining("outside") }),
+			});
+		} finally {
+			await daemon.stop();
+		}
+	});
+
 	test("passes trailing app-server args to opened workspace app-servers", async () => {
 		const dirs = createDirs();
 		const workspace = realpathSync(dirs.projectDir);
