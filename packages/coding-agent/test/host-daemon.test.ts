@@ -481,6 +481,94 @@ describe("host daemon", () => {
 		}
 	});
 
+	test("stages, unstages, and commits git changes inside an allowlisted workspace", async () => {
+		const dirs = createDirs();
+		const workspace = realpathSync(dirs.projectDir);
+		execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
+		execFileSync("git", ["config", "user.email", "host-daemon@example.test"], { cwd: workspace });
+		execFileSync("git", ["config", "user.name", "Host Daemon Test"], { cwd: workspace });
+		writeFileSync(join(workspace, "tracked.txt"), "before\n");
+		execFileSync("git", ["add", "tracked.txt"], { cwd: workspace });
+		execFileSync("git", ["commit", "-m", "init"], { cwd: workspace, stdio: "ignore" });
+		writeFileSync(join(workspace, "tracked.txt"), "before\nafter\n");
+		const daemon = await startHostDaemon([
+			"--token",
+			"secret-token",
+			"--listen",
+			"127.0.0.1:0",
+			"--workspace",
+			workspace,
+		]);
+
+		try {
+			const baseUrl = `http://${daemon.host}:${daemon.port}`;
+			const listed = await rpc(baseUrl, { id: "workspaces", method: "workspace/list" }, "secret-token");
+			const workspaceId = (
+				listed.json as { result: { workspaces: Array<{ id: string; path: string }> } }
+			).result.workspaces.find((candidate) => candidate.path === workspace)?.id;
+
+			const staged = await rpc(
+				baseUrl,
+				{ id: "stage", method: "workspace/git/stage", params: { workspaceId, path: "tracked.txt" } },
+				"secret-token",
+			);
+			expect(staged.status).toBe(200);
+			expect(staged.json).toEqual({
+				id: "stage",
+				result: {
+					status: [expect.objectContaining({ path: "tracked.txt", staged: true, status: "M ", unstaged: false })],
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const unstaged = await rpc(
+				baseUrl,
+				{ id: "unstage", method: "workspace/git/unstage", params: { workspaceId, path: "tracked.txt" } },
+				"secret-token",
+			);
+			expect(unstaged.status).toBe(200);
+			expect(unstaged.json).toEqual({
+				id: "unstage",
+				result: {
+					status: [expect.objectContaining({ path: "tracked.txt", staged: false, status: " M", unstaged: true })],
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const emptyCommit = await rpc(
+				baseUrl,
+				{ id: "empty-commit", method: "workspace/git/commit", params: { workspaceId, message: "   " } },
+				"secret-token",
+			);
+			expect(emptyCommit.status).toBe(400);
+			expect(emptyCommit.json).toEqual({
+				error: expect.objectContaining({ message: expect.stringContaining("Commit message") }),
+			});
+
+			await rpc(
+				baseUrl,
+				{ id: "stage-again", method: "workspace/git/stage", params: { workspaceId, path: "tracked.txt" } },
+				"secret-token",
+			);
+			const committed = await rpc(
+				baseUrl,
+				{ id: "commit", method: "workspace/git/commit", params: { workspaceId, message: "remote commit" } },
+				"secret-token",
+			);
+			expect(committed.status).toBe(200);
+			expect(committed.json).toEqual({
+				id: "commit",
+				result: {
+					output: expect.stringContaining("remote commit"),
+					status: [],
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+		} finally {
+			await daemon.stop();
+		}
+	});
+
 	test("passes trailing app-server args to opened workspace app-servers", async () => {
 		const dirs = createDirs();
 		const workspace = realpathSync(dirs.projectDir);

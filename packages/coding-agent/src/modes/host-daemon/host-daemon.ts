@@ -59,6 +59,10 @@ interface WorkspaceGitPathParams extends WorkspaceOpenParams {
 	path?: string;
 }
 
+interface WorkspaceGitCommitParams extends WorkspaceOpenParams {
+	message?: string;
+}
+
 interface GitStatusEntry {
 	status: string;
 	path: string;
@@ -301,6 +305,15 @@ function parseWorkspaceGitPathParams(params: unknown): WorkspaceGitPathParams {
 		throw new Error("Expected params.path to be a string");
 	}
 	return { ...workspace, path: value.path };
+}
+
+function parseWorkspaceGitCommitParams(params: unknown): WorkspaceGitCommitParams {
+	const workspace = parseWorkspaceParams(params);
+	const value = params as { message?: unknown };
+	if (value.message !== undefined && typeof value.message !== "string") {
+		throw new Error("Expected params.message to be a string");
+	}
+	return { ...workspace, message: value.message };
 }
 
 function parseAppServerRequest(value: unknown): AppServerRequest {
@@ -736,6 +749,50 @@ class WorkspaceRuntimeManager {
 		}
 	}
 
+	async gitStage(params: WorkspaceGitPathParams): Promise<{
+		status: GitStatusEntry[];
+		workspace: HostDaemonWorkspace;
+	}> {
+		const workspace = this.resolve(params);
+		if (!params.path) {
+			throw new Error("Expected params.path");
+		}
+		resolveWorkspacePath(workspace.path, params.path);
+		await execFileAsync("git", ["add", "--", params.path], { cwd: workspace.path });
+		return await this.gitStatus({ workspaceId: workspace.id });
+	}
+
+	async gitUnstage(params: WorkspaceGitPathParams): Promise<{
+		status: GitStatusEntry[];
+		workspace: HostDaemonWorkspace;
+	}> {
+		const workspace = this.resolve(params);
+		if (!params.path) {
+			throw new Error("Expected params.path");
+		}
+		resolveWorkspacePath(workspace.path, params.path);
+		await execFileAsync("git", ["restore", "--staged", "--", params.path], { cwd: workspace.path });
+		return await this.gitStatus({ workspaceId: workspace.id });
+	}
+
+	async gitCommit(params: WorkspaceGitCommitParams): Promise<{
+		output: string;
+		status: GitStatusEntry[];
+		workspace: HostDaemonWorkspace;
+	}> {
+		const workspace = this.resolve(params);
+		const message = params.message?.trim();
+		if (!message) {
+			throw new Error("Commit message is required");
+		}
+		const { stderr, stdout } = await execFileAsync("git", ["commit", "-m", message], {
+			cwd: workspace.path,
+			maxBuffer: maxGitDiffBuffer,
+		});
+		const status = await this.gitStatus({ workspaceId: workspace.id });
+		return { output: [stdout, stderr].filter(Boolean).join("\n"), status: status.status, workspace };
+	}
+
 	async close(
 		params: WorkspaceOpenParams,
 	): Promise<{ process?: WorkspaceProcessSnapshot; workspace: HostDaemonWorkspace }> {
@@ -786,6 +843,12 @@ async function handleRpc(request: HostDaemonRequest, context: HostDaemonContext)
 			return { id: request.id, result: await workspaces.gitStatus(parseWorkspaceParams(request.params)) };
 		case "workspace/git/diff":
 			return { id: request.id, result: await workspaces.gitDiff(parseWorkspaceGitPathParams(request.params)) };
+		case "workspace/git/stage":
+			return { id: request.id, result: await workspaces.gitStage(parseWorkspaceGitPathParams(request.params)) };
+		case "workspace/git/unstage":
+			return { id: request.id, result: await workspaces.gitUnstage(parseWorkspaceGitPathParams(request.params)) };
+		case "workspace/git/commit":
+			return { id: request.id, result: await workspaces.gitCommit(parseWorkspaceGitCommitParams(request.params)) };
 		case "workspace/close":
 			return { id: request.id, result: await workspaces.close(parseWorkspaceParams(request.params)) };
 		case "server/shutdown":
