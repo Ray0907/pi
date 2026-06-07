@@ -578,6 +578,12 @@ describe("host daemon", () => {
 		writeFileSync(join(workspace, "tracked.txt"), "before\n");
 		execFileSync("git", ["add", "tracked.txt"], { cwd: workspace });
 		execFileSync("git", ["commit", "-m", "init"], { cwd: workspace, stdio: "ignore" });
+		const manualWorktreePath = join(dirs.tempRoot, "project-manual");
+		execFileSync("git", ["worktree", "add", "-b", "feature/manual", manualWorktreePath, "HEAD"], {
+			cwd: workspace,
+			stdio: "ignore",
+		});
+		const manualWorktree = realpathSync(manualWorktreePath);
 		const daemon = await startHostDaemon([
 			"--token",
 			"secret-token",
@@ -603,8 +609,29 @@ describe("host daemon", () => {
 			expect(worktrees.json).toEqual({
 				id: "worktrees",
 				result: {
-					worktrees: [expect.objectContaining({ current: true, path: workspace })],
+					worktrees: expect.arrayContaining([
+						expect.objectContaining({ current: true, path: workspace }),
+						expect.objectContaining({ current: false, path: manualWorktree }),
+					]),
 					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const openedWorktree = await rpc(
+				baseUrl,
+				{
+					id: "open-worktree",
+					method: "workspace/git/worktree/open",
+					params: { workspaceId, worktreePath: manualWorktree },
+				},
+				"secret-token",
+			);
+			expect(openedWorktree.status).toBe(200);
+			expect(openedWorktree.json).toEqual({
+				id: "open-worktree",
+				result: {
+					workspace: expect.objectContaining({ path: manualWorktree }),
+					workspaces: expect.arrayContaining([expect.objectContaining({ path: manualWorktree })]),
 				},
 			});
 

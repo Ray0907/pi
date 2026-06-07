@@ -67,6 +67,10 @@ interface WorkspaceGitWorktreeCreateParams extends WorkspaceOpenParams {
 	branchName?: string;
 }
 
+interface WorkspaceGitWorktreeOpenParams extends WorkspaceOpenParams {
+	worktreePath?: string;
+}
+
 interface GitStatusEntry {
 	status: string;
 	path: string;
@@ -335,6 +339,15 @@ function parseWorkspaceGitWorktreeCreateParams(params: unknown): WorkspaceGitWor
 		throw new Error("Expected params.branchName to be a string");
 	}
 	return { ...workspace, branchName: value.branchName };
+}
+
+function parseWorkspaceGitWorktreeOpenParams(params: unknown): WorkspaceGitWorktreeOpenParams {
+	const workspace = parseWorkspaceParams(params);
+	const value = params as { worktreePath?: unknown };
+	if (value.worktreePath !== undefined && typeof value.worktreePath !== "string") {
+		throw new Error("Expected params.worktreePath to be a string");
+	}
+	return { ...workspace, worktreePath: value.worktreePath };
 }
 
 function parseAppServerRequest(value: unknown): AppServerRequest {
@@ -923,6 +936,26 @@ class WorkspaceRuntimeManager {
 		};
 	}
 
+	async openGitWorktree(params: WorkspaceGitWorktreeOpenParams): Promise<{
+		workspace: HostDaemonWorkspace;
+		workspaces: Array<HostDaemonWorkspace & { process?: WorkspaceProcessSnapshot }>;
+	}> {
+		const workspace = this.resolve(params);
+		if (!params.worktreePath) {
+			throw new Error("Expected params.worktreePath");
+		}
+		const worktreePath = realpathSync(resolve(workspace.path, params.worktreePath));
+		const worktrees = await this.listGitWorktrees({ workspaceId: workspace.id });
+		if (!worktrees.worktrees.some((candidate) => candidate.path === worktreePath)) {
+			throw new Error("Worktree not found");
+		}
+		const newWorkspace = resolveWorkspace(worktreePath, workspace.path);
+		if (!this.options.workspaces.some((candidate) => candidate.id === newWorkspace.id)) {
+			this.options.workspaces.push(newWorkspace);
+		}
+		return { workspace: newWorkspace, workspaces: this.list() };
+	}
+
 	async close(
 		params: WorkspaceOpenParams,
 	): Promise<{ process?: WorkspaceProcessSnapshot; workspace: HostDaemonWorkspace }> {
@@ -985,6 +1018,11 @@ async function handleRpc(request: HostDaemonRequest, context: HostDaemonContext)
 			return {
 				id: request.id,
 				result: await workspaces.createGitWorktree(parseWorkspaceGitWorktreeCreateParams(request.params)),
+			};
+		case "workspace/git/worktree/open":
+			return {
+				id: request.id,
+				result: await workspaces.openGitWorktree(parseWorkspaceGitWorktreeOpenParams(request.params)),
 			};
 		case "workspace/close":
 			return { id: request.id, result: await workspaces.close(parseWorkspaceParams(request.params)) };
