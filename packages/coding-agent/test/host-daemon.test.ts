@@ -569,6 +569,97 @@ describe("host daemon", () => {
 		}
 	});
 
+	test("lists and creates git worktrees inside an allowlisted workspace", async () => {
+		const dirs = createDirs();
+		const workspace = realpathSync(dirs.projectDir);
+		execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
+		execFileSync("git", ["config", "user.email", "host-daemon@example.test"], { cwd: workspace });
+		execFileSync("git", ["config", "user.name", "Host Daemon Test"], { cwd: workspace });
+		writeFileSync(join(workspace, "tracked.txt"), "before\n");
+		execFileSync("git", ["add", "tracked.txt"], { cwd: workspace });
+		execFileSync("git", ["commit", "-m", "init"], { cwd: workspace, stdio: "ignore" });
+		const daemon = await startHostDaemon([
+			"--token",
+			"secret-token",
+			"--listen",
+			"127.0.0.1:0",
+			"--workspace",
+			workspace,
+		]);
+
+		try {
+			const baseUrl = `http://${daemon.host}:${daemon.port}`;
+			const listed = await rpc(baseUrl, { id: "workspaces", method: "workspace/list" }, "secret-token");
+			const workspaceId = (
+				listed.json as { result: { workspaces: Array<{ id: string; path: string }> } }
+			).result.workspaces.find((candidate) => candidate.path === workspace)?.id;
+
+			const worktrees = await rpc(
+				baseUrl,
+				{ id: "worktrees", method: "workspace/git/worktree/list", params: { workspaceId } },
+				"secret-token",
+			);
+			expect(worktrees.status).toBe(200);
+			expect(worktrees.json).toEqual({
+				id: "worktrees",
+				result: {
+					worktrees: [expect.objectContaining({ current: true, path: workspace })],
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const created = await rpc(
+				baseUrl,
+				{
+					id: "create-worktree",
+					method: "workspace/git/worktree/create",
+					params: { workspaceId, branchName: "feature/test-worktree" },
+				},
+				"secret-token",
+			);
+			expect(created.status).toBe(200);
+			const createdResult = created.json as {
+				result: {
+					workspace: { id: string; path: string };
+					worktree: { path: string };
+					workspaces: Array<{ path: string }>;
+				};
+			};
+			expect(createdResult.result.worktree.path).toBe(createdResult.result.workspace.path);
+			expect(createdResult.result.workspace.path).toContain("project-feature-test-worktree");
+			expect(
+				createdResult.result.workspaces.some((candidate) => candidate.path === createdResult.result.workspace.path),
+			).toBe(true);
+
+			const refreshed = await rpc(baseUrl, { id: "list-after-create", method: "workspace/list" }, "secret-token");
+			expect(refreshed.json).toEqual({
+				id: "list-after-create",
+				result: {
+					workspaces: expect.arrayContaining([
+						expect.objectContaining({ path: workspace }),
+						expect.objectContaining({ path: createdResult.result.workspace.path }),
+					]),
+				},
+			});
+
+			const invalid = await rpc(
+				baseUrl,
+				{
+					id: "invalid-worktree",
+					method: "workspace/git/worktree/create",
+					params: { workspaceId, branchName: "bad branch" },
+				},
+				"secret-token",
+			);
+			expect(invalid.status).toBe(400);
+			expect(invalid.json).toEqual({
+				error: expect.objectContaining({ message: expect.stringContaining("Branch name") }),
+			});
+		} finally {
+			await daemon.stop();
+		}
+	});
+
 	test("passes trailing app-server args to opened workspace app-servers", async () => {
 		const dirs = createDirs();
 		const workspace = realpathSync(dirs.projectDir);

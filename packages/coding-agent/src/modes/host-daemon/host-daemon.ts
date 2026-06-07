@@ -63,6 +63,10 @@ interface WorkspaceGitCommitParams extends WorkspaceOpenParams {
 	message?: string;
 }
 
+interface WorkspaceGitWorktreeCreateParams extends WorkspaceOpenParams {
+	branchName?: string;
+}
+
 interface GitStatusEntry {
 	status: string;
 	path: string;
@@ -74,6 +78,14 @@ interface GitStatusEntry {
 interface GitDiffResult {
 	path: string;
 	diff: string;
+}
+
+interface WorktreeEntry {
+	path: string;
+	head?: string;
+	branch?: string;
+	detached: boolean;
+	current: boolean;
 }
 
 interface AppServerRequest {
@@ -316,6 +328,15 @@ function parseWorkspaceGitCommitParams(params: unknown): WorkspaceGitCommitParam
 	return { ...workspace, message: value.message };
 }
 
+function parseWorkspaceGitWorktreeCreateParams(params: unknown): WorkspaceGitWorktreeCreateParams {
+	const workspace = parseWorkspaceParams(params);
+	const value = params as { branchName?: unknown };
+	if (value.branchName !== undefined && typeof value.branchName !== "string") {
+		throw new Error("Expected params.branchName to be a string");
+	}
+	return { ...workspace, branchName: value.branchName };
+}
+
 function parseAppServerRequest(value: unknown): AppServerRequest {
 	if (typeof value !== "object" || value === null || !("method" in value)) {
 		throw new Error("Expected params.request to be a JSON-RPC request object with a method");
@@ -424,6 +445,61 @@ function parseGitStatusLine(line: string): GitStatusEntry | undefined {
 		unstaged: untracked || status[1] !== " ",
 		untracked,
 	};
+}
+
+function parseWorktreeList(stdout: string, cwd: string): WorktreeEntry[] {
+	const entries: WorktreeEntry[] = [];
+	let current: Partial<WorktreeEntry> | undefined;
+	for (const line of stdout.split("\n")) {
+		if (!line.trim()) {
+			if (current?.path) {
+				entries.push(normalizeWorktree(current, cwd));
+			}
+			current = undefined;
+			continue;
+		}
+		current ??= {};
+		const [key, ...rest] = line.split(" ");
+		const value = rest.join(" ");
+		if (key === "worktree") {
+			current.path = value;
+		} else if (key === "HEAD") {
+			current.head = value;
+		} else if (key === "branch") {
+			current.branch = value.replace(/^refs\/heads\//, "");
+		} else if (key === "detached") {
+			current.detached = true;
+		}
+	}
+	if (current?.path) {
+		entries.push(normalizeWorktree(current, cwd));
+	}
+	return entries;
+}
+
+function normalizeWorktree(entry: Partial<WorktreeEntry>, cwd: string): WorktreeEntry {
+	return {
+		branch: entry.branch,
+		current: entry.path === cwd,
+		detached: entry.detached ?? false,
+		head: entry.head,
+		path: entry.path ?? "",
+	};
+}
+
+function makeWorktreePath(cwd: string, branchName: string): string {
+	const baseName = basename(cwd);
+	const slug =
+		branchName
+			.replace(/[^A-Za-z0-9._-]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 64) || "worktree";
+	let targetPath = resolve(dirname(cwd), `${baseName}-${slug}`);
+	if (!existsSync(targetPath)) {
+		return targetPath;
+	}
+	targetPath = resolve(dirname(cwd), `${baseName}-${slug}-${Date.now().toString(36)}`);
+	return targetPath;
 }
 
 class WorkspaceRuntime {
@@ -793,6 +869,60 @@ class WorkspaceRuntimeManager {
 		return { output: [stdout, stderr].filter(Boolean).join("\n"), status: status.status, workspace };
 	}
 
+	async listGitWorktrees(params: WorkspaceOpenParams): Promise<{
+		worktrees: WorktreeEntry[];
+		workspace: HostDaemonWorkspace;
+	}> {
+		const workspace = this.resolve(params);
+		try {
+			const { stdout } = await execFileAsync("git", ["worktree", "list", "--porcelain"], {
+				cwd: workspace.path,
+				maxBuffer: maxGitDiffBuffer,
+			});
+			return { worktrees: parseWorktreeList(stdout, workspace.path), workspace };
+		} catch {
+			return { worktrees: [], workspace };
+		}
+	}
+
+	async createGitWorktree(params: WorkspaceGitWorktreeCreateParams): Promise<{
+		output: string;
+		workspace: HostDaemonWorkspace;
+		worktree: WorktreeEntry;
+		workspaces: Array<HostDaemonWorkspace & { process?: WorkspaceProcessSnapshot }>;
+	}> {
+		const workspace = this.resolve(params);
+		const branch = params.branchName?.trim();
+		if (!branch) {
+			throw new Error("Branch name is required");
+		}
+		if (branch.startsWith("-") || /\s/.test(branch)) {
+			throw new Error("Branch name cannot start with '-' or contain whitespace");
+		}
+		await execFileAsync("git", ["check-ref-format", "--branch", branch], { cwd: workspace.path });
+		const targetPath = makeWorktreePath(workspace.path, branch);
+		const { stderr, stdout } = await execFileAsync("git", ["worktree", "add", "-b", branch, targetPath, "HEAD"], {
+			cwd: workspace.path,
+			maxBuffer: maxGitDiffBuffer,
+		});
+		const newWorkspace = resolveWorkspace(targetPath, workspace.path);
+		if (!this.options.workspaces.some((candidate) => candidate.id === newWorkspace.id)) {
+			this.options.workspaces.push(newWorkspace);
+		}
+		const worktrees = await this.listGitWorktrees({ workspaceId: workspace.id });
+		const worktree = worktrees.worktrees.find((candidate) => candidate.path === newWorkspace.path) ?? {
+			current: false,
+			detached: false,
+			path: newWorkspace.path,
+		};
+		return {
+			output: [stdout, stderr].filter(Boolean).join("\n"),
+			workspace: newWorkspace,
+			workspaces: this.list(),
+			worktree,
+		};
+	}
+
 	async close(
 		params: WorkspaceOpenParams,
 	): Promise<{ process?: WorkspaceProcessSnapshot; workspace: HostDaemonWorkspace }> {
@@ -849,6 +979,13 @@ async function handleRpc(request: HostDaemonRequest, context: HostDaemonContext)
 			return { id: request.id, result: await workspaces.gitUnstage(parseWorkspaceGitPathParams(request.params)) };
 		case "workspace/git/commit":
 			return { id: request.id, result: await workspaces.gitCommit(parseWorkspaceGitCommitParams(request.params)) };
+		case "workspace/git/worktree/list":
+			return { id: request.id, result: await workspaces.listGitWorktrees(parseWorkspaceParams(request.params)) };
+		case "workspace/git/worktree/create":
+			return {
+				id: request.id,
+				result: await workspaces.createGitWorktree(parseWorkspaceGitWorktreeCreateParams(request.params)),
+			};
 		case "workspace/close":
 			return { id: request.id, result: await workspaces.close(parseWorkspaceParams(request.params)) };
 		case "server/shutdown":
