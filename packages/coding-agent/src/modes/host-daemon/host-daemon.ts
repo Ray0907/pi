@@ -1,10 +1,11 @@
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, execFile, spawn } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 type HostDaemonRequestId = string | number | null | undefined;
 
@@ -54,6 +55,23 @@ interface WorkspaceFileParams extends WorkspaceOpenParams {
 	path?: string;
 }
 
+interface WorkspaceGitPathParams extends WorkspaceOpenParams {
+	path?: string;
+}
+
+interface GitStatusEntry {
+	status: string;
+	path: string;
+	staged: boolean;
+	unstaged: boolean;
+	untracked: boolean;
+}
+
+interface GitDiffResult {
+	path: string;
+	diff: string;
+}
+
 interface AppServerRequest {
 	id?: string | number | null;
 	method: string;
@@ -98,6 +116,8 @@ const ignoredDirectories = new Set([
 const maxFileEntries = 500;
 const maxFileDepth = 5;
 const maxReadBytes = 1024 * 1024;
+const maxGitDiffBuffer = 8 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
 
 function parseListen(value: string): { host: string; port: number } {
 	const lastColon = value.lastIndexOf(":");
@@ -274,6 +294,15 @@ function parseWorkspaceFileParams(params: unknown): WorkspaceFileParams {
 	return { ...workspace, path: value.path };
 }
 
+function parseWorkspaceGitPathParams(params: unknown): WorkspaceGitPathParams {
+	const workspace = parseWorkspaceParams(params);
+	const value = params as { path?: unknown };
+	if (value.path !== undefined && typeof value.path !== "string") {
+		throw new Error("Expected params.path to be a string");
+	}
+	return { ...workspace, path: value.path };
+}
+
 function parseAppServerRequest(value: unknown): AppServerRequest {
 	if (typeof value !== "object" || value === null || !("method" in value)) {
 		throw new Error("Expected params.request to be a JSON-RPC request object with a method");
@@ -362,6 +391,26 @@ async function walkWorkspaceFiles(
 			await walkWorkspaceFiles(root, absolutePath, depth + 1, entries);
 		}
 	}
+}
+
+function parseGitStatusLine(line: string): GitStatusEntry | undefined {
+	if (line.length < 4) {
+		return undefined;
+	}
+	const status = line.slice(0, 2);
+	const rawPath = line.slice(3).trim();
+	const path = rawPath.includes(" -> ") ? rawPath.split(" -> ").at(-1)?.trim() : rawPath;
+	if (!path) {
+		return undefined;
+	}
+	const untracked = status === "??";
+	return {
+		path,
+		staged: !untracked && status[0] !== " " && status[0] !== "?",
+		status,
+		unstaged: untracked || status[1] !== " ",
+		untracked,
+	};
 }
 
 class WorkspaceRuntime {
@@ -641,6 +690,52 @@ class WorkspaceRuntimeManager {
 		return { file: { content: contentBuffer.toString("utf8"), path: params.path, truncated }, workspace };
 	}
 
+	async gitStatus(params: WorkspaceOpenParams): Promise<{
+		status: GitStatusEntry[];
+		workspace: HostDaemonWorkspace;
+	}> {
+		const workspace = this.resolve(params);
+		try {
+			const { stdout } = await execFileAsync("git", ["status", "--short"], { cwd: workspace.path });
+			const status = stdout
+				.split("\n")
+				.map((line) => parseGitStatusLine(line))
+				.filter((entry): entry is GitStatusEntry => entry !== undefined);
+			return { status, workspace };
+		} catch {
+			return { status: [], workspace };
+		}
+	}
+
+	async gitDiff(params: WorkspaceGitPathParams): Promise<{
+		diff: GitDiffResult;
+		workspace: HostDaemonWorkspace;
+	}> {
+		const workspace = this.resolve(params);
+		if (!params.path) {
+			throw new Error("Expected params.path");
+		}
+		resolveWorkspacePath(workspace.path, params.path);
+		const headDiff = await execFileAsync("git", ["diff", "HEAD", "--", params.path], {
+			cwd: workspace.path,
+			maxBuffer: maxGitDiffBuffer,
+		});
+		if (headDiff.stdout) {
+			return { diff: { diff: headDiff.stdout, path: params.path }, workspace };
+		}
+
+		try {
+			const untrackedDiff = await execFileAsync("git", ["diff", "--no-index", "--", "/dev/null", params.path], {
+				cwd: workspace.path,
+				maxBuffer: maxGitDiffBuffer,
+			});
+			return { diff: { diff: untrackedDiff.stdout, path: params.path }, workspace };
+		} catch (error) {
+			const maybeDiff = error as { stdout?: string };
+			return { diff: { diff: maybeDiff.stdout ?? "", path: params.path }, workspace };
+		}
+	}
+
 	async close(
 		params: WorkspaceOpenParams,
 	): Promise<{ process?: WorkspaceProcessSnapshot; workspace: HostDaemonWorkspace }> {
@@ -687,6 +782,10 @@ async function handleRpc(request: HostDaemonRequest, context: HostDaemonContext)
 			return { id: request.id, result: await workspaces.listFiles(parseWorkspaceParams(request.params)) };
 		case "workspace/file/read":
 			return { id: request.id, result: await workspaces.readFile(parseWorkspaceFileParams(request.params)) };
+		case "workspace/git/status":
+			return { id: request.id, result: await workspaces.gitStatus(parseWorkspaceParams(request.params)) };
+		case "workspace/git/diff":
+			return { id: request.id, result: await workspaces.gitDiff(parseWorkspaceGitPathParams(request.params)) };
 		case "workspace/close":
 			return { id: request.id, result: await workspaces.close(parseWorkspaceParams(request.params)) };
 		case "server/shutdown":

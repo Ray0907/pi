@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -372,6 +372,104 @@ describe("host daemon", () => {
 			const outside = await rpc(
 				baseUrl,
 				{ id: "outside", method: "workspace/file/read", params: { workspaceId, path: "../outside.txt" } },
+				"secret-token",
+			);
+			expect(outside.status).toBe(400);
+			expect(outside.json).toEqual({
+				error: expect.objectContaining({ message: expect.stringContaining("outside") }),
+			});
+		} finally {
+			await daemon.stop();
+		}
+	});
+
+	test("returns git status and diffs inside an allowlisted workspace", async () => {
+		const dirs = createDirs();
+		const workspace = realpathSync(dirs.projectDir);
+		execFileSync("git", ["init"], { cwd: workspace, stdio: "ignore" });
+		execFileSync("git", ["config", "user.email", "host-daemon@example.test"], { cwd: workspace });
+		execFileSync("git", ["config", "user.name", "Host Daemon Test"], { cwd: workspace });
+		writeFileSync(join(workspace, "tracked.txt"), "before\n");
+		execFileSync("git", ["add", "tracked.txt"], { cwd: workspace });
+		execFileSync("git", ["commit", "-m", "init"], { cwd: workspace, stdio: "ignore" });
+		writeFileSync(join(workspace, "tracked.txt"), "before\nafter\n");
+		writeFileSync(join(workspace, "new.txt"), "new file content\n");
+		const daemon = await startHostDaemon([
+			"--token",
+			"secret-token",
+			"--listen",
+			"127.0.0.1:0",
+			"--workspace",
+			workspace,
+		]);
+
+		try {
+			const baseUrl = `http://${daemon.host}:${daemon.port}`;
+			const listed = await rpc(baseUrl, { id: "workspaces", method: "workspace/list" }, "secret-token");
+			const workspaceId = (
+				listed.json as { result: { workspaces: Array<{ id: string; path: string }> } }
+			).result.workspaces.find((candidate) => candidate.path === workspace)?.id;
+
+			const status = await rpc(
+				baseUrl,
+				{ id: "git-status", method: "workspace/git/status", params: { workspaceId } },
+				"secret-token",
+			);
+			expect(status.status).toBe(200);
+			expect(status.json).toEqual({
+				id: "git-status",
+				result: {
+					status: expect.arrayContaining([
+						expect.objectContaining({
+							path: "tracked.txt",
+							staged: false,
+							status: " M",
+							unstaged: true,
+							untracked: false,
+						}),
+						expect.objectContaining({
+							path: "new.txt",
+							staged: false,
+							status: "??",
+							unstaged: true,
+							untracked: true,
+						}),
+					]),
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const trackedDiff = await rpc(
+				baseUrl,
+				{ id: "tracked-diff", method: "workspace/git/diff", params: { workspaceId, path: "tracked.txt" } },
+				"secret-token",
+			);
+			expect(trackedDiff.status).toBe(200);
+			expect(trackedDiff.json).toEqual({
+				id: "tracked-diff",
+				result: {
+					diff: { diff: expect.stringContaining("+after"), path: "tracked.txt" },
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const untrackedDiff = await rpc(
+				baseUrl,
+				{ id: "untracked-diff", method: "workspace/git/diff", params: { workspaceId, path: "new.txt" } },
+				"secret-token",
+			);
+			expect(untrackedDiff.status).toBe(200);
+			expect(untrackedDiff.json).toEqual({
+				id: "untracked-diff",
+				result: {
+					diff: { diff: expect.stringContaining("+new file content"), path: "new.txt" },
+					workspace: expect.objectContaining({ id: workspaceId, path: workspace }),
+				},
+			});
+
+			const outside = await rpc(
+				baseUrl,
+				{ id: "outside", method: "workspace/git/diff", params: { workspaceId, path: "../outside.txt" } },
 				"secret-token",
 			);
 			expect(outside.status).toBe(400);
